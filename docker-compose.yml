@@ -1,0 +1,15 @@
+services:
+  simplechat:
+    build: .
+    container_name: simplechat
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - simplechat_data:/app/data
+      - ./config:/app/config
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+
+volumes:
+  simplechat_data:
