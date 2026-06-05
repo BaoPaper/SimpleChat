@@ -73,9 +73,22 @@ function logout() {
     state.token = '';
     state.username = '';
     localStorage.removeItem('simplechat_token');
+    localStorage.removeItem('simplechat_last_session');
     state.sessions = [];
     state.currentSessionId = null;
     state.messages = [];
+
+    // 清空 DOM 残留，防止登录其他账号时看到旧内容
+    document.getElementById('messagesContainer').innerHTML = '';
+    document.getElementById('chatList').innerHTML = '';
+    document.getElementById('noSessions').style.display = 'none';
+
+    // 重置 URL 到首页
+    const url = '/';
+    if (window.location.pathname !== url) {
+        window.history.replaceState({ sessionId: null }, '', url);
+    }
+
     showLogin();
 }
 
