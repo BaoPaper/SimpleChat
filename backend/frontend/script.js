@@ -60,7 +60,8 @@ function logout() {
 async function checkAuth() {
     if (!state.token) return false;
     try {
-        await apiJSON('/api/check');
+        const data = await apiJSON('/api/check');
+        state.username = data.username || '';
         return true;
     } catch {
         state.token = '';
@@ -76,14 +77,22 @@ async function loadSessions() {
     renderSessionList();
 }
 
-async function createSession() {
+async function createSession(options = {}) {
+    const { loadMessages = true } = options;
     const data = await apiJSON('/api/sessions', {
         method: 'POST',
         body: JSON.stringify({ title: '新对话' }),
     });
     state.sessions.unshift(data.session);
-    renderSessionList();
-    switchSession(data.session.id);
+
+    if (loadMessages) {
+        switchSession(data.session.id);
+    } else {
+        state.currentSessionId = data.session.id;
+        localStorage.setItem('simplechat_last_session', data.session.id);
+        renderSessionList();
+    }
+
     return data.session;
 }
 
@@ -116,6 +125,7 @@ async function loadSessionMessages(id) {
 
 function switchSession(id) {
     state.currentSessionId = id;
+    localStorage.setItem('simplechat_last_session', id);
     state.messages = [];
     const msgContainer = document.getElementById('messagesContainer');
     msgContainer.style.display = 'none';
@@ -177,8 +187,7 @@ async function sendMessage() {
     if (!message) return;
 
     if (!state.currentSessionId) {
-        const session = await createSession();
-        state.currentSessionId = session.id;
+        await createSession({ loadMessages: false });
     }
 
     input.value = '';

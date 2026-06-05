@@ -10,8 +10,8 @@
     <script src="/libs/highlight.min.js"></script>
 </head>
 <body>
-    <!-- 登录覆盖层 -->
-    <div class="login-overlay" id="loginOverlay">
+    <!-- 登录覆盖层：默认隐藏，认证检查完成后再显示，避免已登录刷新时登录页闪一下 -->
+    <div class="login-overlay" id="loginOverlay" style="display: none;">
         <div class="login-card">
             <h1 class="login-logo">SimpleChat</h1>
             <p class="login-subtitle">简洁、快速的 LLM 聊天</p>
