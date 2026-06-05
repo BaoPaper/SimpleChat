@@ -583,15 +583,44 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // === 侧边栏折叠 ===
-    sidebarToggle.addEventListener('click', () => {
+    const isMobile = () => window.innerWidth <= 768;
+
+    function collapseSidebar() {
         sidebar.classList.add('collapsed');
         sidebarExpandBtn.style.display = 'flex';
-    });
+    }
 
-    sidebarExpandBtn.addEventListener('click', () => {
+    function expandSidebar() {
         sidebar.classList.remove('collapsed');
         sidebarExpandBtn.style.display = 'none';
+    }
+
+    // 根据屏幕尺寸自动处理侧边栏状态
+    function autoSidebarState() {
+        if (isMobile()) {
+            collapseSidebar();
+        } else {
+            expandSidebar();
+        }
+    }
+
+    sidebarToggle.addEventListener('click', collapseSidebar);
+    sidebarExpandBtn.addEventListener('click', expandSidebar);
+
+    // 窗口大小变化时自动调整
+    let lastWasMobile = isMobile();
+    window.addEventListener('resize', () => {
+        const nowMobile = isMobile();
+        if (nowMobile !== lastWasMobile) {
+            lastWasMobile = nowMobile;
+            autoSidebarState();
+        }
     });
+
+    // 初始化时根据屏幕尺寸设置侧边栏状态
+    if (isMobile()) {
+        collapseSidebar();
+    }
 
     // === 侧边栏会话点击 ===
     chatList.addEventListener('click', async (e) => {
