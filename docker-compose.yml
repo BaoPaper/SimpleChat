@@ -5,11 +5,8 @@ services:
     ports:
       - "${PORT:-8080}:8080"
     volumes:
-      - simplechat_data:/app/data
+      - ./data:/app/data
       - ./config:/app/config
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
-
-volumes:
-  simplechat_data:
