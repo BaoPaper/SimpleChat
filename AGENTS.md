@@ -79,11 +79,10 @@ SimpleChat/
 │       ├── index.html
 │       ├── script.js
 │       └── styles.css
-├── scripts/                 ← 构建脚本
-│   └── download-deps.sh     ← 下载前端依赖（marked.js, highlight.js 等）
 ├── config/                  ← 运行时自动生成，用户编辑
 ├── Dockerfile               ← 多阶段构建
 ├── docker-compose.yml
+├── Makefile                 ← 构建脚本
 └── .gitignore
 ```
 
