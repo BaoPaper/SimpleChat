@@ -13,6 +13,28 @@ const state = {
     isStreaming: false,
 };
 
+// ---- URL 路由 ----
+
+/** 从 URL 路径中提取会话 ID，如 /chat/xxx -> xxx */
+function getSessionIdFromURL() {
+    const match = window.location.pathname.match(/^\/chat\/([a-zA-Z0-9_-]+)$/);
+    return match ? match[1] : null;
+}
+
+/** 用 replaceState 同步 URL（不会新增历史记录） */
+function syncURL(sessionId) {
+    const url = sessionId ? `/chat/${sessionId}` : '/';
+    if (window.location.pathname !== url) {
+        window.history.replaceState({ sessionId }, '', url);
+    }
+}
+
+/** 用 pushState 导航到新 URL（新增历史记录） */
+function pushURL(sessionId) {
+    const url = sessionId ? `/chat/${sessionId}` : '/';
+    window.history.pushState({ sessionId }, '', url);
+}
+
 // ---- API 客户端 ----
 async function api(path, options = {}) {
     const headers = {
@@ -86,10 +108,11 @@ async function createSession(options = {}) {
     state.sessions.unshift(data.session);
 
     if (loadMessages) {
-        switchSession(data.session.id);
+        switchSession(data.session.id, { pushHistory: true });
     } else {
         state.currentSessionId = data.session.id;
         localStorage.setItem('simplechat_last_session', data.session.id);
+        syncURL(data.session.id);
         renderSessionList();
     }
 
@@ -102,6 +125,7 @@ async function deleteSession(id) {
     if (state.currentSessionId === id) {
         state.currentSessionId = null;
         state.messages = [];
+        syncURL(null);
         showGreeting();
     }
     renderSessionList();
@@ -123,9 +147,18 @@ async function loadSessionMessages(id) {
     renderMessages();
 }
 
-function switchSession(id) {
+function switchSession(id, options = {}) {
+    const { pushHistory = false } = options;
     state.currentSessionId = id;
     localStorage.setItem('simplechat_last_session', id);
+
+    // 更新 URL
+    if (pushHistory) {
+        pushURL(id);
+    } else {
+        syncURL(id);
+    }
+
     state.messages = [];
     const msgContainer = document.getElementById('messagesContainer');
     msgContainer.style.display = 'none';
@@ -521,9 +554,31 @@ document.addEventListener('DOMContentLoaded', () => {
             updateGreeting();
             chatInput.focus();
 
-            const lastSessionId = localStorage.getItem('simplechat_last_session');
-            if (lastSessionId && state.sessions.find(s => s.id === lastSessionId)) {
-                switchSession(lastSessionId);
+            // 优先从 URL 读取会话 ID（支持 /chat/:id 直接访问）
+            const sessionIdFromURL = getSessionIdFromURL();
+            if (sessionIdFromURL) {
+                const exists = state.sessions.find(s => s.id === sessionIdFromURL);
+                if (exists) {
+                    switchSession(sessionIdFromURL);
+                } else {
+                    // URL 中的会话不在列表中，尝试从服务端加载
+                    try {
+                        const data = await apiJSON(`/api/sessions/${sessionIdFromURL}`);
+                        if (data.session) {
+                            state.sessions.unshift(data.session);
+                            switchSession(sessionIdFromURL);
+                        } else {
+                            syncURL(null);
+                        }
+                    } catch {
+                        syncURL(null);
+                    }
+                }
+            } else {
+                const lastSessionId = localStorage.getItem('simplechat_last_session');
+                if (lastSessionId && state.sessions.find(s => s.id === lastSessionId)) {
+                    switchSession(lastSessionId);
+                }
             }
         } catch (err) {
             console.error('初始化失败:', err);
@@ -635,10 +690,9 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // 切换会话
+        // 切换会话（用户主动点击，pushState 新增历史记录）
         if (state.isStreaming) return;
-        switchSession(sessionId);
-        localStorage.setItem('simplechat_last_session', sessionId);
+        switchSession(sessionId, { pushHistory: true });
     });
 
     // === 模型选择 ===
@@ -734,4 +788,52 @@ document.addEventListener('DOMContentLoaded', () => {
             svg.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>';
         }
     }
+
+    // === 浏览器前进/后退（popstate） ===
+    window.addEventListener('popstate', async (e) => {
+        const sessionId = getSessionIdFromURL();
+
+        if (!sessionId) {
+            // 回到首页
+            if (state.currentSessionId !== null) {
+                state.currentSessionId = null;
+                state.messages = [];
+                showGreeting();
+                renderSessionList();
+            }
+            return;
+        }
+
+        if (sessionId === state.currentSessionId) return;
+
+        // 加载目标会话（直接操作状态，不调用 switchSession 以免重复修改 URL）
+        try {
+            const exists = state.sessions.find(s => s.id === sessionId);
+            if (!exists) {
+                const data = await apiJSON(`/api/sessions/${sessionId}`);
+                if (data.session) {
+                    state.sessions.unshift(data.session);
+                } else {
+                    return;
+                }
+            }
+
+            state.currentSessionId = sessionId;
+            localStorage.setItem('simplechat_last_session', sessionId);
+            state.messages = [];
+            const msgContainer = document.getElementById('messagesContainer');
+            msgContainer.style.display = 'none';
+            msgContainer.innerHTML = '';
+            document.getElementById('greetingContainer').style.display = 'none';
+
+            await loadSessionMessages(sessionId);
+            scrollToBottom();
+            renderSessionList();
+        } catch {
+            // 会话不存在，回到首页
+            if (state.currentSessionId === null) {
+                window.history.replaceState({ sessionId: null }, '', '/');
+            }
+        }
+    });
 });
