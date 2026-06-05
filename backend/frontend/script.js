@@ -294,17 +294,6 @@ function addMessageBubble(role, content) {
     const div = document.createElement('div');
     div.className = `message-bubble ${role}`;
 
-    const avatar = document.createElement('div');
-    avatar.className = 'message-avatar';
-    avatar.textContent = role === 'user' ? '👤' : '🤖';
-
-    const body = document.createElement('div');
-    body.className = 'message-body';
-
-    const roleLabel = document.createElement('div');
-    roleLabel.className = 'message-role';
-    roleLabel.textContent = role === 'user' ? (state.username || '你') : 'AI';
-
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content';
 
@@ -316,10 +305,7 @@ function addMessageBubble(role, content) {
         highlightCodeBlocks(contentDiv);
     }
 
-    body.appendChild(roleLabel);
-    body.appendChild(contentDiv);
-    div.appendChild(avatar);
-    div.appendChild(body);
+    div.appendChild(contentDiv);
     container.appendChild(div);
 
     return div;
@@ -344,26 +330,12 @@ function renderMessages() {
         const div = document.createElement('div');
         div.className = `message-bubble ${msg.role}`;
 
-        const avatar = document.createElement('div');
-        avatar.className = 'message-avatar';
-        avatar.textContent = msg.role === 'user' ? '👤' : '🤖';
-
-        const body = document.createElement('div');
-        body.className = 'message-body';
-
-        const roleLabel = document.createElement('div');
-        roleLabel.className = 'message-role';
-        roleLabel.textContent = msg.role === 'user' ? (state.username || '你') : 'AI';
-
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
         contentDiv.innerHTML = renderMarkdown(msg.content);
         highlightCodeBlocks(contentDiv);
 
-        body.appendChild(roleLabel);
-        body.appendChild(contentDiv);
-        div.appendChild(avatar);
-        div.appendChild(body);
+        div.appendChild(contentDiv);
         container.appendChild(div);
     }
 
