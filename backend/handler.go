@@ -239,14 +239,138 @@ func (h *Handler) Chat(c *gin.Context) {
 		return
 	}
 
+	chatMessages := buildChatMessages(h.Settings.SystemPrompt, messages)
+
+	// 流式响应
+	h.streamChatToSSE(c, sessionID, req.Model, chatMessages, userMsg.ID)
+}
+
+// ==================== 编辑消息（重新发送）====================
+
+func (h *Handler) EditChat(c *gin.Context) {
+	username := getUser(c)
+
+	messageIDStr := c.Param("message_id")
+	var messageID int64
+	if _, err := fmt.Sscanf(messageIDStr, "%d", &messageID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的消息 ID"})
+		return
+	}
+
+	var req struct {
+		SessionID string `json:"session_id"`
+		Content   string `json:"content"`
+		Model     string `json:"model"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Content == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "内容不能为空"})
+		return
+	}
+
+	// 校验会话所有权
+	session, _, err := h.DB.GetSession(req.SessionID)
+	if err != nil || session == nil || session.UserID != username {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权操作此会话"})
+		return
+	}
+
+	// 更新用户消息内容
+	if err := h.DB.UpdateMessageContent(messageID, req.Content); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新消息失败"})
+		return
+	}
+
+	// 删除该消息之后的所有消息
+	if err := h.DB.DeleteMessagesAfter(req.SessionID, messageID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "截断会话失败"})
+		return
+	}
+
+	// 选择模型
+	model := req.Model
+	if model == "" {
+		model = h.ModelsConfig.DefaultModel
+	}
+
+	// 构建消息上下文
+	messages, err := h.DB.GetMessages(req.SessionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取消息历史失败"})
+		return
+	}
+
+	chatMessages := buildChatMessages(h.Settings.SystemPrompt, messages)
+
+	// 流式响应
+	h.streamChatToSSE(c, req.SessionID, model, chatMessages, messageID)
+}
+
+// ==================== 重新生成 ====================
+
+func (h *Handler) RegenerateChat(c *gin.Context) {
+	username := getUser(c)
+
+	messageIDStr := c.Param("message_id")
+	var messageID int64
+	if _, err := fmt.Sscanf(messageIDStr, "%d", &messageID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的消息 ID"})
+		return
+	}
+
+	// 获取要删除的消息
+	msg, err := h.DB.GetMessageByID(messageID)
+	if err != nil || msg == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "消息不存在"})
+		return
+	}
+	if msg.Role != "assistant" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "只能重新生成 AI 回复"})
+		return
+	}
+
+	// 校验会话所有权
+	session, _, err := h.DB.GetSession(msg.SessionID)
+	if err != nil || session == nil || session.UserID != username {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权操作此会话"})
+		return
+	}
+
+	// 删除该消息及之后的所有消息
+	if err := h.DB.DeleteMessagesFrom(msg.SessionID, messageID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "截断会话失败"})
+		return
+	}
+
+	// 获取剩余消息作为上下文
+	messages, err := h.DB.GetMessages(msg.SessionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取消息历史失败"})
+		return
+	}
+
+	chatMessages := buildChatMessages(h.Settings.SystemPrompt, messages)
+
+	// 使用默认模型
+	model := h.ModelsConfig.DefaultModel
+
+	// 流式响应
+	h.streamChatToSSE(c, msg.SessionID, model, chatMessages, 0)
+}
+
+// buildChatMessages 构建发送给 OpenAI 的消息列表
+func buildChatMessages(systemPrompt string, messages []Message) []ChatMessage {
 	chatMessages := make([]ChatMessage, 0, len(messages)+1)
-	if h.Settings.SystemPrompt != "" {
-		chatMessages = append(chatMessages, ChatMessage{Role: "system", Content: h.Settings.SystemPrompt})
+	if systemPrompt != "" {
+		chatMessages = append(chatMessages, ChatMessage{Role: "system", Content: systemPrompt})
 	}
 	for _, m := range messages {
 		chatMessages = append(chatMessages, ChatMessage{Role: m.Role, Content: m.Content})
 	}
+	return chatMessages
+}
 
+// streamChatToSSE 向 OpenAI 发起流式请求，将结果以 SSE 写入响应
+func (h *Handler) streamChatToSSE(c *gin.Context, sessionID, model string, chatMessages []ChatMessage, userMsgID int64) {
 	// 设置 SSE 响应头
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
@@ -256,16 +380,18 @@ func (h *Handler) Chat(c *gin.Context) {
 
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "不支持流式传输"})
 		return
 	}
 
-	sendSSE(c.Writer, flusher, "meta", map[string]interface{}{
+	metaData := map[string]interface{}{
 		"session_id": sessionID,
-		"message_id": userMsg.ID,
-	})
+	}
+	if userMsgID > 0 {
+		metaData["message_id"] = userMsgID
+	}
+	sendSSE(c.Writer, flusher, "meta", metaData)
 
-	contentCh, errCh := h.OpenAI.StreamChat(req.Model, chatMessages)
+	contentCh, errCh := h.OpenAI.StreamChat(model, chatMessages)
 
 	var fullContent strings.Builder
 

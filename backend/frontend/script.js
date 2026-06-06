@@ -13,6 +13,14 @@ const state = {
     isStreaming: false,
 };
 
+// ---- SVG 图标（气泡操作按钮）----
+const ICONS = {
+    copy: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>',
+    edit: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>',
+    refresh: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>',
+    check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>',
+};
+
 // ---- URL 路由 ----
 
 /** 从 URL 路径中提取会话 ID，如 /chat/xxx -> xxx */
@@ -240,12 +248,11 @@ async function sendMessage() {
     input.style.height = 'auto';
     document.getElementById('sendBtn').setAttribute('disabled', 'true');
 
-    addMessageBubble('user', message);
+    const userBubble = addMessageBubble('user', message);
     scrollToBottom();
 
-    const assistantEl = addMessageBubble('assistant', '');
-    const contentEl = assistantEl.querySelector('.message-content');
-    let fullContent = '';
+    const assistantBubble = addMessageBubble('assistant', '');
+    const contentEl = assistantBubble.querySelector('.message-content');
 
     state.isStreaming = true;
 
@@ -268,34 +275,20 @@ async function sendMessage() {
             throw new Error(errData.error || `请求失败 (${response.status})`);
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+        const result = await streamChatSSE(response, contentEl);
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                try {
-                    const event = JSON.parse(line.slice(6));
-                    handleSSEEvent(event, contentEl, (c) => { fullContent = c; });
-                } catch {
-                    // 忽略
-                }
-            }
+        // 更新用户气泡的 messageId（来自 meta 事件）
+        if (result.userMessageId) {
+            userBubble.dataset.messageId = result.userMessageId;
         }
-
-        if (buffer.startsWith('data: ')) {
-            try {
-                const event = JSON.parse(buffer.slice(6));
-                handleSSEEvent(event, contentEl, (c) => { fullContent = c; });
-            } catch { /* ignore */ }
+        // 更新助手气泡的 messageId（来自 done 事件）
+        if (result.assistantMessageId) {
+            assistantBubble.dataset.messageId = result.assistantMessageId;
+        }
+        // 更新 sessionId（来自 meta 事件）
+        if (result.sessionId && !state.currentSessionId) {
+            state.currentSessionId = result.sessionId;
+            localStorage.setItem('simplechat_last_session', result.sessionId);
         }
     } catch (err) {
         contentEl.innerHTML = `<span class="error-text">错误: ${escapeHtml(err.message)}</span>`;
@@ -307,54 +300,144 @@ async function sendMessage() {
     loadSessions();
 }
 
-function handleSSEEvent(event, contentEl, setFullContent) {
-    switch (event.type) {
-        case 'meta':
-            if (event.session_id && !state.currentSessionId) {
-                state.currentSessionId = event.session_id;
+/**
+ * 流式读取 SSE 响应，更新内容元素，返回事件数据
+ * @param {Response} response - fetch 返回的响应对象
+ * @param {HTMLElement} contentEl - 用于显示内容的 .message-content 元素
+ * @returns {Promise<{fullContent, assistantMessageId, userMessageId, sessionId}>}
+ */
+async function streamChatSSE(response, contentEl) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+    let assistantMessageId = null;
+    let userMessageId = null;
+    let sessionId = null;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+                const event = JSON.parse(line.slice(6));
+                switch (event.type) {
+                    case 'meta':
+                        if (event.session_id) sessionId = event.session_id;
+                        if (event.message_id) userMessageId = String(event.message_id);
+                        break;
+                    case 'content':
+                        const currentText = contentEl.getAttribute('data-raw') || '';
+                        const newText = currentText + (event.content || '');
+                        contentEl.setAttribute('data-raw', newText);
+                        contentEl.innerHTML = renderMarkdown(newText);
+                        highlightCodeBlocks(contentEl);
+                        fullContent = newText;
+                        scrollToBottom();
+                        break;
+                    case 'done':
+                        if (event.message_id) assistantMessageId = String(event.message_id);
+                        fullContent = contentEl.getAttribute('data-raw') || '';
+                        break;
+                    case 'error':
+                        contentEl.innerHTML = `<span class="error-text">错误: ${escapeHtml(event.error || event.content || '未知错误')}</span>`;
+                        break;
+                }
+            } catch {
+                // 忽略
             }
-            break;
-        case 'content':
-            const currentText = contentEl.getAttribute('data-raw') || '';
-            const newText = currentText + (event.content || '');
-            contentEl.setAttribute('data-raw', newText);
-            contentEl.innerHTML = renderMarkdown(newText);
-            highlightCodeBlocks(contentEl);
-            setFullContent(newText);
-            scrollToBottom();
-            break;
-        case 'done':
-            setFullContent(contentEl.getAttribute('data-raw') || '');
-            break;
-        case 'error':
-            contentEl.innerHTML = `<span class="error-text">错误: ${escapeHtml(event.error || event.content || '未知错误')}</span>`;
-            break;
+        }
     }
+
+    // 处理最后一行
+    if (buffer.startsWith('data: ')) {
+        try {
+            const event = JSON.parse(buffer.slice(6));
+            if (event.type === 'done' && event.message_id) {
+                assistantMessageId = String(event.message_id);
+            }
+            if (event.type === 'content') {
+                const newText = (contentEl.getAttribute('data-raw') || '') + (event.content || '');
+                contentEl.setAttribute('data-raw', newText);
+                contentEl.innerHTML = renderMarkdown(newText);
+                highlightCodeBlocks(contentEl);
+                fullContent = newText;
+            }
+        } catch { /* ignore */ }
+    }
+
+    return { fullContent, assistantMessageId, userMessageId, sessionId };
 }
 
-function addMessageBubble(role, content) {
+function addMessageBubble(role, content, messageId) {
     const container = document.getElementById('messagesContainer');
     document.getElementById('greetingContainer').style.display = 'none';
     container.style.display = 'flex';
 
     const div = document.createElement('div');
     div.className = `message-bubble ${role}`;
+    if (messageId) {
+        div.dataset.messageId = messageId;
+    }
 
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content';
+    contentDiv.setAttribute('data-raw', content || '');
 
     if (role === 'user') {
-        contentDiv.textContent = content;
+        contentDiv.textContent = content || '';
     } else {
-        contentDiv.setAttribute('data-raw', content);
-        contentDiv.innerHTML = renderMarkdown(content);
+        contentDiv.innerHTML = renderMarkdown(content || '');
         highlightCodeBlocks(contentDiv);
     }
 
     div.appendChild(contentDiv);
+
+    // 操作栏
+    div.appendChild(createMessageActions(role));
+
     container.appendChild(div);
 
     return div;
+}
+
+function createMessageActions(role) {
+    const actions = document.createElement('div');
+    actions.className = 'message-actions';
+
+    // 复制按钮（所有角色）
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'action-btn';
+    copyBtn.dataset.action = 'copy';
+    copyBtn.title = '复制';
+    copyBtn.innerHTML = ICONS.copy;
+    actions.appendChild(copyBtn);
+
+    if (role === 'user') {
+        // 编辑按钮
+        const editBtn = document.createElement('button');
+        editBtn.className = 'action-btn';
+        editBtn.dataset.action = 'edit';
+        editBtn.title = '编辑';
+        editBtn.innerHTML = ICONS.edit;
+        actions.appendChild(editBtn);
+    } else if (role === 'assistant') {
+        // 重新生成按钮
+        const regenBtn = document.createElement('button');
+        regenBtn.className = 'action-btn';
+        regenBtn.dataset.action = 'regenerate';
+        regenBtn.title = '重新生成';
+        regenBtn.innerHTML = ICONS.refresh;
+        actions.appendChild(regenBtn);
+    }
+
+    return actions;
 }
 
 function renderMessages() {
@@ -375,13 +458,16 @@ function renderMessages() {
     for (const msg of state.messages) {
         const div = document.createElement('div');
         div.className = `message-bubble ${msg.role}`;
+        div.dataset.messageId = msg.id;
 
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
+        contentDiv.setAttribute('data-raw', msg.content || '');
         contentDiv.innerHTML = renderMarkdown(msg.content);
         highlightCodeBlocks(contentDiv);
 
         div.appendChild(contentDiv);
+        div.appendChild(createMessageActions(msg.role));
         container.appendChild(div);
     }
 
@@ -485,6 +571,260 @@ function scrollToBottom() {
         const area = document.getElementById('chatArea');
         area.scrollTop = area.scrollHeight;
     });
+}
+
+// ==================== 气泡操作功能 ====================
+
+/** 获取气泡内原始文本 */
+function getBubbleRawText(bubble) {
+    const contentEl = bubble.querySelector('.message-content');
+    return contentEl.getAttribute('data-raw') || contentEl.textContent || '';
+}
+
+/** 复制文本到剪贴板 */
+async function handleCopy(btn) {
+    const bubble = btn.closest('.message-bubble');
+    const text = getBubbleRawText(bubble);
+    try {
+        await navigator.clipboard.writeText(text);
+        btn.innerHTML = ICONS.check;
+        setTimeout(() => {
+            btn.innerHTML = ICONS.copy;
+        }, 1500);
+    } catch {
+        // fallback
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        btn.innerHTML = ICONS.check;
+        setTimeout(() => { btn.innerHTML = ICONS.copy; }, 1500);
+    }
+}
+
+/** 进入编辑模式 */
+function enterEditMode(bubble) {
+    if (state.isStreaming) return;
+    const contentEl = bubble.querySelector('.message-content');
+    const rawText = contentEl.getAttribute('data-raw') || contentEl.textContent || '';
+
+    // 隐藏内容区域，显示 textarea
+    contentEl.style.display = 'none';
+
+    // 创建编辑区域
+    const editArea = document.createElement('div');
+    editArea.className = 'edit-area';
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'edit-textarea';
+    textarea.value = rawText;
+    textarea.setAttribute('data-original', rawText);
+    editArea.appendChild(textarea);
+
+    const editActions = document.createElement('div');
+    editActions.className = 'edit-actions';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'edit-btn edit-save-btn';
+    saveBtn.textContent = '保存并发送';
+    editActions.appendChild(saveBtn);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'edit-btn edit-cancel-btn';
+    cancelBtn.textContent = '取消';
+    editActions.appendChild(cancelBtn);
+
+    editArea.appendChild(editActions);
+    bubble.querySelector('.message-actions').style.display = 'none';
+    bubble.classList.add('editing');
+    bubble.appendChild(editArea);
+
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+    // 自动调整高度
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+    textarea.addEventListener('input', function () {
+        this.style.height = 'auto';
+        this.style.height = this.scrollHeight + 'px';
+    });
+
+    // 保存按钮
+    saveBtn.addEventListener('click', () => saveEdit(bubble));
+    // 取消按钮
+    cancelBtn.addEventListener('click', () => cancelEdit(bubble));
+    // Ctrl+Enter 或 Command+Enter 保存
+    textarea.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            e.preventDefault();
+            saveEdit(bubble);
+        }
+        if (e.key === 'Escape') {
+            cancelEdit(bubble);
+        }
+    });
+}
+
+/** 取消编辑 */
+function cancelEdit(bubble) {
+    const contentEl = bubble.querySelector('.message-content');
+    const editArea = bubble.querySelector('.edit-area');
+    if (editArea) editArea.remove();
+    contentEl.style.display = '';
+    bubble.querySelector('.message-actions').style.display = '';
+    bubble.classList.remove('editing');
+}
+
+/** 保存并发送编辑 */
+async function saveEdit(bubble) {
+    if (state.isStreaming) return;
+    const textarea = bubble.querySelector('.edit-textarea');
+    const newContent = textarea.value.trim();
+    if (!newContent) return;
+
+    const messageId = bubble.dataset.messageId;
+    if (!messageId) return;
+
+    const sessionId = state.currentSessionId;
+    if (!sessionId) return;
+
+    // 禁用输入框，防止流式输出期间误发新消息
+    state.isStreaming = true;
+    document.getElementById('sendBtn').setAttribute('disabled', 'true');
+
+    // 乐观更新：先更新 UI，再发请求
+    const contentEl = bubble.querySelector('.message-content');
+    const editArea = bubble.querySelector('.edit-area');
+    if (editArea) editArea.remove();
+    bubble.querySelector('.message-actions').style.display = '';
+    bubble.classList.remove('editing');
+
+    contentEl.setAttribute('data-raw', newContent);
+    contentEl.textContent = newContent;
+    contentEl.style.display = '';
+
+    // 删除该气泡之后的所有 DOM 气泡
+    let next = bubble.nextElementSibling;
+    const toRemove = [];
+    while (next) {
+        toRemove.push(next);
+        next = next.nextElementSibling;
+    }
+    toRemove.forEach(el => el.remove());
+
+    // 添加新的空助手气泡
+    const assistantBubble = addMessageBubble('assistant', '');
+    const newContentEl = assistantBubble.querySelector('.message-content');
+    scrollToBottom();
+
+    try {
+        const response = await fetch(`/api/chat/edit/${messageId}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${state.token}`,
+            },
+            body: JSON.stringify({
+                session_id: sessionId,
+                content: newContent,
+                model: state.currentModel,
+            }),
+        });
+
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData.error || `请求失败 (${response.status})`);
+        }
+
+        const result = await streamChatSSE(response, newContentEl);
+        if (result.assistantMessageId) {
+            assistantBubble.dataset.messageId = result.assistantMessageId;
+        }
+    } catch (err) {
+        console.error('Edit error:', err);
+        // 网络错误：从服务器拉取真实数据恢复界面
+        try {
+            await loadSessionMessages(sessionId);
+        } catch { /* ignore */ }
+    }
+
+    state.isStreaming = false;
+    scrollToBottom();
+    loadSessions();
+}
+
+/** 重新生成 */
+async function handleRegenerate(btn) {
+    if (state.isStreaming) return;
+    const bubble = btn.closest('.message-bubble');
+    const messageId = bubble.dataset.messageId;
+    if (!messageId) return;
+    const sessionId = state.currentSessionId;
+    if (!sessionId) return;
+
+    // 禁用输入框，防止流式输出期间误发新消息
+    state.isStreaming = true;
+    document.getElementById('sendBtn').setAttribute('disabled', 'true');
+
+    // 乐观更新：先更新 UI，再发请求
+    let current = bubble;
+    const toRemove = [];
+    while (current) {
+        toRemove.push(current);
+        current = current.nextElementSibling;
+    }
+    toRemove.forEach(el => el.remove());
+
+    // 在相同位置插入新的助手气泡
+    const container = document.getElementById('messagesContainer');
+    const newBubble = document.createElement('div');
+    newBubble.className = 'message-bubble assistant';
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+    contentDiv.setAttribute('data-raw', '');
+    newBubble.appendChild(contentDiv);
+    newBubble.appendChild(createMessageActions('assistant'));
+    container.appendChild(newBubble);
+
+    const newContentEl = newBubble.querySelector('.message-content');
+    scrollToBottom();
+
+    try {
+        const response = await fetch(`/api/chat/regenerate/${messageId}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${state.token}`,
+            },
+            body: JSON.stringify({
+                session_id: sessionId,
+            }),
+        });
+
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData.error || `请求失败 (${response.status})`);
+        }
+
+        const result = await streamChatSSE(response, newContentEl);
+        if (result.assistantMessageId) {
+            newBubble.dataset.messageId = result.assistantMessageId;
+        }
+    } catch (err) {
+        console.error('Regenerate error:', err);
+        // 网络错误：从服务器拉取真实数据恢复界面
+        try {
+            await loadSessionMessages(sessionId);
+        } catch { /* ignore */ }
+    }
+
+    state.isStreaming = false;
+    scrollToBottom();
+    loadSessions();
 }
 
 function closeAllDropdowns() {
@@ -774,6 +1114,31 @@ document.addEventListener('DOMContentLoaded', () => {
         // 不关闭正在处理的 modelDropdown 点击
         if (e.target.closest('#modelDropdown')) return;
         closeAllDropdowns();
+    });
+
+    // === 气泡操作按钮事件委托 ===
+    const messagesContainer = document.getElementById('messagesContainer');
+    messagesContainer.addEventListener('click', (e) => {
+        const btn = e.target.closest('.action-btn');
+        if (!btn) return;
+
+        const action = btn.dataset.action;
+        const bubble = btn.closest('.message-bubble');
+        if (!bubble) return;
+
+        e.stopPropagation();
+
+        switch (action) {
+            case 'copy':
+                handleCopy(btn);
+                break;
+            case 'edit':
+                enterEditMode(bubble);
+                break;
+            case 'regenerate':
+                handleRegenerate(btn);
+                break;
+        }
     });
 
     // === 暗色模式 ===

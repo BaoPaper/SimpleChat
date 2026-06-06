@@ -78,6 +78,8 @@ func main() {
 			auth.PUT("/sessions/:id", handler.UpdateSession)
 			auth.DELETE("/sessions/:id", handler.DeleteSession)
 			auth.POST("/chat", handler.Chat)
+			auth.PUT("/chat/edit/:message_id", handler.EditChat)
+			auth.POST("/chat/regenerate/:message_id", handler.RegenerateChat)
 		}
 	}
 

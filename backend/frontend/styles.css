@@ -267,16 +267,18 @@ body {
 
 /* 消息气泡 — 无背景无头像无昵称，纯文字靠左/靠右 */
 .message-bubble {
-    display: flex; padding: 8px 24px;
+    display: flex;
+    flex-direction: column;
+    padding: 8px 24px;
 }
-.message-bubble.user { justify-content: flex-end; }
+.message-bubble.user { align-items: flex-end; }
 .message-bubble.user .message-content {
     max-width: 75%;
     background-color: var(--hover-bg);
     border-radius: 18px;
     padding: 10px 16px;
 }
-.message-bubble.assistant { justify-content: flex-start; }
+.message-bubble.assistant { align-items: flex-start; }
 
 .message-content {
     min-width: 0;
@@ -334,6 +336,105 @@ body {
 .message-content img { max-width: 100%; border-radius: var(--radius-sm); }
 
 .error-text { color: var(--danger); }
+
+/* ==================== 气泡操作栏 ==================== */
+.message-actions {
+    display: flex;
+    gap: 2px;
+    padding: 8px 4px 0 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.message-bubble:hover .message-actions {
+    opacity: 1;
+}
+/* 用户气泡：按钮靠右 */
+.message-bubble.user .message-actions {
+    justify-content: flex-end;
+}
+/* AI 气泡：按钮靠左 */
+.message-bubble.assistant .message-actions {
+    justify-content: flex-start;
+}
+
+.action-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.15s, color 0.15s;
+    line-height: 1;
+}
+.action-btn:hover {
+    background-color: var(--hover-bg);
+    color: var(--text-primary);
+}
+
+/* ==================== 编辑模式 ==================== */
+.edit-area {
+    width: 100%;
+}
+.message-bubble.user .edit-area {
+    max-width: 75%;
+}
+
+.edit-textarea {
+    width: 100%;
+    min-height: 80px;
+    max-height: 300px;
+    padding: 10px 14px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background-color: var(--input-bg);
+    color: var(--text-primary);
+    font-size: 15px;
+    font-family: inherit;
+    line-height: 1.6;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.2s;
+}
+.edit-textarea:focus {
+    border-color: var(--accent);
+}
+
+.edit-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    justify-content: flex-end;
+}
+
+.edit-btn {
+    padding: 6px 14px;
+    border: none;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+.edit-btn:hover {
+    opacity: 0.85;
+}
+.edit-save-btn {
+    background-color: var(--send-btn-bg);
+    color: var(--send-btn-color);
+    font-weight: 500;
+}
+.edit-cancel-btn {
+    background-color: var(--hover-bg);
+    color: var(--text-primary);
+}
+
+.message-bubble.editing .message-actions {
+    display: none !important;
+}
 
 .message-content:empty::after {
     content: "▊";

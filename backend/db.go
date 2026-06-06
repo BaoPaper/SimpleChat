@@ -222,6 +222,39 @@ func truncateTitle(content string, maxLen int) string {
 	return string(runes[:maxLen]) + "..."
 }
 
+// UpdateMessageContent 更新指定消息的内容
+func (d *DB) UpdateMessageContent(id int64, content string) error {
+	_, err := d.conn.Exec("UPDATE messages SET content = ? WHERE id = ?", content, id)
+	return err
+}
+
+// DeleteMessagesAfter 删除指定消息之后的所有消息（按 id 递增顺序）
+func (d *DB) DeleteMessagesAfter(sessionID string, afterID int64) error {
+	_, err := d.conn.Exec("DELETE FROM messages WHERE session_id = ? AND id > ?", sessionID, afterID)
+	return err
+}
+
+// DeleteMessagesFrom 删除指定消息及之后的所有消息（用于重新生成场景）
+func (d *DB) DeleteMessagesFrom(sessionID string, fromID int64) error {
+	_, err := d.conn.Exec("DELETE FROM messages WHERE session_id = ? AND id >= ?", sessionID, fromID)
+	return err
+}
+
+// GetMessageByID 获取单个消息
+func (d *DB) GetMessageByID(id int64) (*Message, error) {
+	var m Message
+	err := d.conn.QueryRow(
+		"SELECT id, session_id, role, content, created_at FROM messages WHERE id = ?", id,
+	).Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 // Close 关闭数据库连接
 func (d *DB) Close() error {
 	return d.conn.Close()
