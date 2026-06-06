@@ -217,6 +217,18 @@ func (h *Handler) Chat(c *gin.Context) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问此会话"})
 			return
 		}
+
+		// 检查是否存在正在生成中的 assistant 占位消息
+		pending, err := h.DB.HasPendingAssistant(req.SessionID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "检查会话状态失败"})
+			return
+		}
+		if pending {
+			c.JSON(http.StatusConflict, gin.H{"error": "当前会话已有回复正在生成，请稍后再试"})
+			return
+		}
+
 		sessionID = req.SessionID
 	} else {
 		s, err := h.DB.CreateSession(username, "")
@@ -243,8 +255,8 @@ func (h *Handler) Chat(c *gin.Context) {
 
 	chatMessages := buildChatMessages(h.Settings.SystemPrompt, messages)
 
-	// 流式响应
-	h.streamChatToSSE(c, sessionID, req.Model, chatMessages, userMsg.ID)
+	// 流式响应（普通 Chat，user 消息是刚创建的，占位失败时可以删除）
+	h.streamChatToSSE(c, sessionID, req.Model, chatMessages, userMsg.ID, true)
 }
 
 // ==================== 编辑消息（重新发送）====================
@@ -276,9 +288,33 @@ func (h *Handler) EditChat(c *gin.Context) {
 		return
 	}
 
-	// 更新用户消息内容
-	if err := h.DB.UpdateMessageContent(messageID, req.Content); err != nil {
+	// 校验消息归属和角色
+	msg, err := h.DB.GetMessageByID(messageID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取消息失败"})
+		return
+	}
+	if msg == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "消息不存在"})
+		return
+	}
+	if msg.SessionID != req.SessionID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "消息不属于当前会话"})
+		return
+	}
+	if msg.Role != "user" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "只能编辑用户消息"})
+		return
+	}
+
+	// 安全更新用户消息内容（带 session 和 role 校验）
+	updated, err := h.DB.UpdateUserMessageContent(req.SessionID, messageID, req.Content)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新消息失败"})
+		return
+	}
+	if !updated {
+		c.JSON(http.StatusNotFound, gin.H{"error": "消息不存在或不可编辑"})
 		return
 	}
 
@@ -303,8 +339,8 @@ func (h *Handler) EditChat(c *gin.Context) {
 
 	chatMessages := buildChatMessages(h.Settings.SystemPrompt, messages)
 
-	// 流式响应
-	h.streamChatToSSE(c, req.SessionID, model, chatMessages, messageID)
+	// 流式响应（EditChat，user 消息是已存在的，绝不能因占位失败删除）
+	h.streamChatToSSE(c, req.SessionID, model, chatMessages, messageID, false)
 }
 
 // ==================== 重新生成 ====================
@@ -355,8 +391,8 @@ func (h *Handler) RegenerateChat(c *gin.Context) {
 	// 使用默认模型
 	model := h.ModelsConfig.DefaultModel
 
-	// 流式响应
-	h.streamChatToSSE(c, msg.SessionID, model, chatMessages, 0)
+	// 流式响应（RegenerateChat，userMsgID=0，不需要清理）
+	h.streamChatToSSE(c, msg.SessionID, model, chatMessages, 0, false)
 }
 
 // buildChatMessages 构建发送给 OpenAI 的消息列表
@@ -372,7 +408,15 @@ func buildChatMessages(systemPrompt string, messages []Message) []ChatMessage {
 }
 
 // streamChatToSSE 向 OpenAI 发起流式请求，将结果以 SSE 写入响应
-func (h *Handler) streamChatToSSE(c *gin.Context, sessionID, model string, chatMessages []ChatMessage, userMsgID int64) {
+// cleanupUserMsgOnPlaceholderFail：创建 assistant 占位失败时是否删除 userMsgID 对应的消息
+func (h *Handler) streamChatToSSE(
+	c *gin.Context,
+	sessionID string,
+	model string,
+	chatMessages []ChatMessage,
+	userMsgID int64,
+	cleanupUserMsgOnPlaceholderFail bool,
+) {
 	// 设置 SSE 响应头
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
@@ -385,27 +429,46 @@ func (h *Handler) streamChatToSSE(c *gin.Context, sessionID, model string, chatM
 		return
 	}
 
+	connected := true
+	clientDone := c.Request.Context().Done()
+
 	// 后台任务 context，客户端断开不影响 LLM 继续
 	jobCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
+	// 先创建 assistant 占位消息，作为任务锚点
+	assistantMsg, err := h.DB.AddAssistantPlaceholder(sessionID)
+	if err != nil {
+		// 数据库层面防止了并发占位（唯一索引），可能因冲突失败
+		// 仅当调用来明确允许时，才删除刚创建的 user 消息
+		if cleanupUserMsgOnPlaceholderFail && userMsgID > 0 {
+			_ = h.DB.DeleteMessageInSession(sessionID, userMsgID)
+		}
+		if connected {
+			_ = sendSSE(c.Writer, flusher, "error", "当前会话已有回复正在生成，请稍后再试")
+		}
+		return
+	}
+	assistantMsgID := assistantMsg.ID
+
+	// 发送 meta 事件
 	metaData := map[string]interface{}{
-		"session_id": sessionID,
+		"session_id":           sessionID,
+		"assistant_message_id": assistantMsgID,
 	}
 	if userMsgID > 0 {
 		metaData["message_id"] = userMsgID
 	}
-	if err := sendSSE(c.Writer, flusher, "meta", metaData); err != nil {
-		// meta 发送失败说明连接一开始就有问题，直接返回
-		return
+	if connected {
+		if err := sendSSE(c.Writer, flusher, "meta", metaData); err != nil {
+			connected = false
+		}
 	}
 
 	contentCh, errCh := h.OpenAI.StreamChat(jobCtx, model, chatMessages)
 
 	var fullContent strings.Builder
 	var finalErr error
-	connected := true
-	clientDone := c.Request.Context().Done()
 
 	for contentCh != nil || errCh != nil {
 		select {
@@ -439,33 +502,44 @@ func (h *Handler) streamChatToSSE(c *gin.Context, sessionID, model string, chatM
 
 	// LLM 完成后处理结果
 	if finalErr != nil {
+		// 把占位消息更新为错误文本，避免留下永久空消息
+		errText := "错误: " + finalErr.Error()
+		if _, updateErr := h.DB.UpdateAssistantMessageContent(sessionID, assistantMsgID, errText); updateErr == nil {
+			// 更新成功或占位已被删除都算正常
+		}
 		if connected {
-			sendSSE(c.Writer, flusher, "error", finalErr.Error())
+			_ = sendSSE(c.Writer, flusher, "error", finalErr.Error())
 		}
 		return
 	}
 
 	assistantContent := fullContent.String()
 	if assistantContent == "" {
+		if _, updateErr := h.DB.UpdateAssistantMessageContent(sessionID, assistantMsgID, "错误: AI 未返回内容"); updateErr == nil {
+		}
 		if connected {
-			sendSSE(c.Writer, flusher, "error", "AI 未返回内容")
+			_ = sendSSE(c.Writer, flusher, "error", "AI 未返回内容")
 		}
 		return
 	}
 
-	// 保存完整 assistant 回复
-	assistantMsg, err := h.DB.AddMessage(sessionID, "assistant", assistantContent)
+	// 更新占位消息为完整回复（而不是新建一条）
+	updated, err := h.DB.UpdateAssistantMessageContent(sessionID, assistantMsgID, assistantContent)
 	if err != nil {
 		if connected {
-			sendSSE(c.Writer, flusher, "error", "保存回复失败")
+			_ = sendSSE(c.Writer, flusher, "error", "保存回复失败")
 		}
+		return
+	}
+	if !updated {
+		// 占位消息已被删除（用户编辑/重发导致旧任务失效），静默结束
 		return
 	}
 
 	if connected {
-		sendSSE(c.Writer, flusher, "done", map[string]interface{}{
+		_ = sendSSE(c.Writer, flusher, "done", map[string]interface{}{
 			"session_id": sessionID,
-			"message_id": assistantMsg.ID,
+			"message_id": assistantMsgID,
 		})
 	}
 }

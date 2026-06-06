@@ -72,7 +72,15 @@ func (d *DB) migrate() error {
 		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+	-- 清理服务重启遗留的空 assistant 占位（必须在唯一索引之前，避免历史重复数据导致失败）
+	UPDATE messages
+	SET content = '错误: 服务重启，生成中断'
+	WHERE role = 'assistant' AND content = '';
+
+	CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
+
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_pending_assistant_per_session
+	ON messages(session_id) WHERE role = 'assistant' AND content = '';
 	`
 	_, err := d.conn.Exec(query)
 	return err
@@ -166,7 +174,7 @@ func (d *DB) DeleteSession(id string) error {
 // GetMessages 获取会话的所有消息（按时间顺序）
 func (d *DB) GetMessages(sessionID string) ([]Message, error) {
 	rows, err := d.conn.Query(
-		"SELECT id, session_id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+		"SELECT id, session_id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY id ASC",
 		sessionID,
 	)
 	if err != nil {
@@ -228,6 +236,35 @@ func (d *DB) UpdateMessageContent(id int64, content string) error {
 	return err
 }
 
+// UpdateUserMessageContent 安全更新用户消息内容（带 session 和 role 校验）
+// 返回 bool 表示是否真的更新到了行
+func (d *DB) UpdateUserMessageContent(sessionID string, messageID int64, content string) (bool, error) {
+	result, err := d.conn.Exec(
+		"UPDATE messages SET content = ? WHERE id = ? AND session_id = ? AND role = 'user'",
+		content, messageID, sessionID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// DeleteMessage 删除单条消息
+func (d *DB) DeleteMessage(id int64) error {
+	_, err := d.conn.Exec("DELETE FROM messages WHERE id = ?", id)
+	return err
+}
+
+// DeleteMessageInSession 在指定 session 内删除单条消息（更安全，防止跨会话误删）
+func (d *DB) DeleteMessageInSession(sessionID string, id int64) error {
+	_, err := d.conn.Exec("DELETE FROM messages WHERE id = ? AND session_id = ?", id, sessionID)
+	return err
+}
+
 // DeleteMessagesAfter 删除指定消息之后的所有消息（按 id 递增顺序）
 func (d *DB) DeleteMessagesAfter(sessionID string, afterID int64) error {
 	_, err := d.conn.Exec("DELETE FROM messages WHERE session_id = ? AND id > ?", sessionID, afterID)
@@ -253,6 +290,50 @@ func (d *DB) GetMessageByID(id int64) (*Message, error) {
 		return nil, err
 	}
 	return &m, nil
+}
+
+// AddAssistantPlaceholder 创建一条空的 assistant 占位消息，表示有回复正在生成
+func (d *DB) AddAssistantPlaceholder(sessionID string) (*Message, error) {
+	return d.AddMessage(sessionID, "assistant", "")
+}
+
+// UpdateAssistantMessageContent 更新指定 assistant 占位消息的内容
+// 返回 bool 表示是否真的更新到了行（如果占位已被删除则返回 false）
+func (d *DB) UpdateAssistantMessageContent(sessionID string, messageID int64, content string) (bool, error) {
+	result, err := d.conn.Exec(
+		"UPDATE messages SET content = ? WHERE id = ? AND session_id = ? AND role = 'assistant'",
+		content, messageID, sessionID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	updated := n > 0
+	if updated {
+		if _, err := d.conn.Exec(
+			"UPDATE sessions SET updated_at = datetime('now') WHERE id = ?",
+			sessionID,
+		); err != nil {
+			return false, err
+		}
+	}
+	return updated, nil
+}
+
+// HasPendingAssistant 检查同一 session 中是否存在正在生成中的 assistant 占位消息
+func (d *DB) HasPendingAssistant(sessionID string) (bool, error) {
+	var exists bool
+	err := d.conn.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = ? AND role = 'assistant' AND content = '')",
+		sessionID,
+	).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 // Close 关闭数据库连接
