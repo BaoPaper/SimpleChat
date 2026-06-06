@@ -463,8 +463,12 @@ function renderMessages() {
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
         contentDiv.setAttribute('data-raw', msg.content || '');
-        contentDiv.innerHTML = renderMarkdown(msg.content);
-        highlightCodeBlocks(contentDiv);
+        if (msg.role === 'user') {
+            contentDiv.textContent = msg.content || '';
+        } else {
+            contentDiv.innerHTML = renderMarkdown(msg.content || '');
+            highlightCodeBlocks(contentDiv);
+        }
 
         div.appendChild(contentDiv);
         div.appendChild(createMessageActions(msg.role));
@@ -477,9 +481,9 @@ function renderMessages() {
 // ---- Markdown 渲染 ----
 function renderMarkdown(text) {
     if (!text) return '';
-    if (typeof marked !== 'undefined') {
+    if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
         marked.setOptions({ breaks: true, gfm: true });
-        return marked.parse(text);
+        return DOMPurify.sanitize(marked.parse(text));
     }
     return escapeHtml(text).replace(/\n/g, '<br>');
 }

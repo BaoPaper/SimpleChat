@@ -7,13 +7,14 @@ GO_DIR       = backend
 
 MARKED_VER   = 15.0.4
 HLJS_VER     = 11.11.1
+DOMPURIFY_VER = 3.2.4
 
 .PHONY: all deps build run docker clean
 
 all: deps build
 
 # 下载前端依赖
-deps: $(LIBS_DIR)/marked.min.js $(LIBS_DIR)/highlight.min.js $(LIBS_DIR)/github-dark.min.css
+deps: $(LIBS_DIR)/marked.min.js $(LIBS_DIR)/highlight.min.js $(LIBS_DIR)/github-dark.min.css $(LIBS_DIR)/purify.min.js
 
 $(LIBS_DIR):
 	mkdir -p $(LIBS_DIR)
@@ -29,6 +30,10 @@ $(LIBS_DIR)/highlight.min.js: | $(LIBS_DIR)
 $(LIBS_DIR)/github-dark.min.css: | $(LIBS_DIR)
 	@echo "Downloading github-dark theme..."
 	curl -sL -o $@ https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@$(HLJS_VER)/styles/github-dark.min.css
+
+$(LIBS_DIR)/purify.min.js: | $(LIBS_DIR)
+	@echo "Downloading DOMPurify $(DOMPURIFY_VER)..."
+	curl -sL -o $@ https://cdn.jsdelivr.net/npm/dompurify@$(DOMPURIFY_VER)/dist/purify.min.js
 
 # 编译 Go 后端
 build: deps

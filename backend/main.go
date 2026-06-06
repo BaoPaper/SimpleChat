@@ -103,6 +103,9 @@ func main() {
 	r.GET("/libs/github-dark.min.css", func(c *gin.Context) {
 		c.Data(http.StatusOK, "text/css; charset=utf-8", mustReadEmbedded("frontend/libs/github-dark.min.css"))
 	})
+	r.GET("/libs/purify.min.js", func(c *gin.Context) {
+		c.Data(http.StatusOK, "text/javascript; charset=utf-8", mustReadEmbedded("frontend/libs/purify.min.js"))
+	})
 
 	// SPA 回退：其余非 API 路径返回 index.html
 	r.NoRoute(func(c *gin.Context) {
