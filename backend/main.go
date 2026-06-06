@@ -101,6 +101,9 @@ func main() {
 	r.GET("/", func(c *gin.Context) {
 		c.Data(http.StatusOK, "text/html; charset=utf-8", mustReadEmbedded("frontend/index.html"))
 	})
+	r.GET("/favicon.svg", func(c *gin.Context) {
+		c.Data(http.StatusOK, "image/svg+xml; charset=utf-8", mustReadEmbedded("frontend/favicon.svg"))
+	})
 	r.GET("/styles.css", func(c *gin.Context) {
 		c.Data(http.StatusOK, "text/css; charset=utf-8", mustReadEmbedded("frontend/styles.css"))
 	})
