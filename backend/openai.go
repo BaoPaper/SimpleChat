@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,7 +51,7 @@ type chatCompletionChunk struct {
 }
 
 // StreamChat 发送流式聊天请求
-func (s *OpenAIService) StreamChat(model string, messages []ChatMessage) (<-chan string, <-chan error) {
+func (s *OpenAIService) StreamChat(ctx context.Context, model string, messages []ChatMessage) (<-chan string, <-chan error) {
 	contentCh := make(chan string, 100)
 	errCh := make(chan error, 1)
 
@@ -73,7 +74,7 @@ func (s *OpenAIService) StreamChat(model string, messages []ChatMessage) (<-chan
 		apiBase := strings.TrimRight(s.ModelsConfig.APIBase, "/")
 		url := apiBase + "/chat/completions"
 
-		req, err := http.NewRequest("POST", url, bytes.NewReader(bodyJSON))
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyJSON))
 		if err != nil {
 			errCh <- fmt.Errorf("创建请求失败: %w", err)
 			return
@@ -119,7 +120,9 @@ func (s *OpenAIService) StreamChat(model string, messages []ChatMessage) (<-chan
 				if choice.Delta.Content != "" {
 					select {
 					case contentCh <- choice.Delta.Content:
-					default:
+					case <-ctx.Done():
+						errCh <- ctx.Err()
+						return
 					}
 				}
 			}

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -383,64 +385,92 @@ func (h *Handler) streamChatToSSE(c *gin.Context, sessionID, model string, chatM
 		return
 	}
 
+	// 后台任务 context，客户端断开不影响 LLM 继续
+	jobCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
 	metaData := map[string]interface{}{
 		"session_id": sessionID,
 	}
 	if userMsgID > 0 {
 		metaData["message_id"] = userMsgID
 	}
-	sendSSE(c.Writer, flusher, "meta", metaData)
+	if err := sendSSE(c.Writer, flusher, "meta", metaData); err != nil {
+		// meta 发送失败说明连接一开始就有问题，直接返回
+		return
+	}
 
-	contentCh, errCh := h.OpenAI.StreamChat(model, chatMessages)
+	contentCh, errCh := h.OpenAI.StreamChat(jobCtx, model, chatMessages)
 
 	var fullContent strings.Builder
+	var finalErr error
+	connected := true
+	clientDone := c.Request.Context().Done()
 
-loop:
-	for {
+	for contentCh != nil || errCh != nil {
 		select {
+		case <-clientDone:
+			// 客户端断开，停止发送 SSE，继续读取 LLM
+			connected = false
+			clientDone = nil
+
 		case content, ok := <-contentCh:
 			if !ok {
-				break loop
+				contentCh = nil
+				continue
 			}
 			fullContent.WriteString(content)
-			sendSSE(c.Writer, flusher, "content", content)
-		case err := <-errCh:
-			if err != nil {
-				sendSSE(c.Writer, flusher, "error", err.Error())
-				return
+			if connected {
+				if err := sendSSE(c.Writer, flusher, "content", content); err != nil {
+					connected = false
+				}
 			}
-			break loop
-		case <-c.Request.Context().Done():
-			break loop
+
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+			if err != nil {
+				finalErr = err
+			}
 		}
 	}
 
-	select {
-	case err := <-errCh:
-		if err != nil {
-			sendSSE(c.Writer, flusher, "error", err.Error())
-			return
+	// LLM 完成后处理结果
+	if finalErr != nil {
+		if connected {
+			sendSSE(c.Writer, flusher, "error", finalErr.Error())
 		}
-	default:
+		return
 	}
 
 	assistantContent := fullContent.String()
-	if assistantContent != "" {
-		assistantMsg, err := h.DB.AddMessage(sessionID, "assistant", assistantContent)
-		if err == nil {
-			sendSSE(c.Writer, flusher, "done", map[string]interface{}{
-				"session_id": sessionID,
-				"message_id": assistantMsg.ID,
-			})
-		} else {
+	if assistantContent == "" {
+		if connected {
+			sendSSE(c.Writer, flusher, "error", "AI 未返回内容")
+		}
+		return
+	}
+
+	// 保存完整 assistant 回复
+	assistantMsg, err := h.DB.AddMessage(sessionID, "assistant", assistantContent)
+	if err != nil {
+		if connected {
 			sendSSE(c.Writer, flusher, "error", "保存回复失败")
 		}
-	} else {
-		sendSSE(c.Writer, flusher, "error", "AI 未返回内容")
+		return
+	}
+
+	if connected {
+		sendSSE(c.Writer, flusher, "done", map[string]interface{}{
+			"session_id": sessionID,
+			"message_id": assistantMsg.ID,
+		})
 	}
 }
 
-func sendSSE(w io.Writer, flusher http.Flusher, eventType string, data interface{}) {
+func sendSSE(w io.Writer, flusher http.Flusher, eventType string, data interface{}) error {
 	payload := map[string]interface{}{
 		"type": eventType,
 	}
@@ -455,8 +485,11 @@ func sendSSE(w io.Writer, flusher http.Flusher, eventType string, data interface
 
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
-		return
+		return fmt.Errorf("序列化 SSE 事件失败: %w", err)
 	}
-	fmt.Fprintf(w, "data: %s\n\n", string(jsonBytes))
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", string(jsonBytes)); err != nil {
+		return fmt.Errorf("写入 SSE 失败: %w", err)
+	}
 	flusher.Flush()
+	return nil
 }
