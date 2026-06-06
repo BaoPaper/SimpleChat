@@ -108,6 +108,8 @@ SimpleChat/
 | PUT | `/api/sessions/:id` | 是 | 重命名会话 |
 | DELETE | `/api/sessions/:id` | 是 | 删除会话 |
 | POST | `/api/chat` | 是 | 发送消息（SSE流式） |
+| PUT  | `/api/chat/edit/:message_id` | 是 | 修改消息 |
+| POST | `/api/chat/regenerate/:message_id` | 是 | 重新生成消息 |
 
 ---
 
