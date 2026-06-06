@@ -243,12 +243,6 @@ func truncateTitle(content string, maxLen int) string {
 	return string(runes[:maxLen]) + "..."
 }
 
-// UpdateMessageContent 更新指定消息的内容
-func (d *DB) UpdateMessageContent(id int64, content string) error {
-	_, err := d.conn.Exec("UPDATE messages SET content = ? WHERE id = ?", content, id)
-	return err
-}
-
 // UpdateUserMessageContent 安全更新用户消息内容（带 session 和 role 校验）
 // 返回 bool 表示是否真的更新到了行
 func (d *DB) UpdateUserMessageContent(sessionID string, messageID int64, content string) (bool, error) {
@@ -264,12 +258,6 @@ func (d *DB) UpdateUserMessageContent(sessionID string, messageID int64, content
 		return false, err
 	}
 	return n > 0, nil
-}
-
-// DeleteMessage 删除单条消息
-func (d *DB) DeleteMessage(id int64) error {
-	_, err := d.conn.Exec("DELETE FROM messages WHERE id = ?", id)
-	return err
 }
 
 // DeleteMessageInSession 在指定 session 内删除单条消息（更安全，防止跨会话误删）
