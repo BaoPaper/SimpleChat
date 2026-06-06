@@ -11,6 +11,7 @@ const state = {
     defaultModel: '',
     currentModel: '',
     isStreaming: false,
+    autoScroll: true,
 };
 
 // ---- SVG 图标（气泡操作按钮）----
@@ -192,7 +193,8 @@ function switchSession(id, options = {}) {
     document.getElementById('greetingContainer').style.display = 'none';
 
     loadSessionMessages(id).then(() => {
-        scrollToBottom();
+        state.autoScroll = true;
+        scrollToBottom({ force: true });
     });
 
     renderSessionList();
@@ -254,10 +256,12 @@ async function sendMessage() {
     document.getElementById('sendBtn').setAttribute('disabled', 'true');
 
     const userBubble = addMessageBubble('user', message);
-    scrollToBottom();
+    state.autoScroll = true;
+    scrollToBottom({ force: true });
 
     const assistantBubble = addMessageBubble('assistant', '');
     const contentEl = assistantBubble.querySelector('.message-content');
+    scrollToBottom({ force: true });
 
     state.isStreaming = true;
 
@@ -480,7 +484,8 @@ function renderMessages() {
         container.appendChild(div);
     }
 
-    scrollToBottom();
+    state.autoScroll = true;
+    scrollToBottom({ force: true });
 }
 
 // ---- Markdown 渲染 ----
@@ -575,10 +580,63 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-function scrollToBottom() {
+const BOTTOM_THRESHOLD = 80;
+
+function isNearBottom(threshold = BOTTOM_THRESHOLD) {
+    const area = document.getElementById('chatArea');
+    if (!area) return true;
+
+    const distance = area.scrollHeight - area.scrollTop - area.clientHeight;
+    return distance <= threshold;
+}
+
+function setScrollBottomButtonVisible(visible) {
+    const btn = document.getElementById('scrollBottomBtn');
+    if (!btn) return;
+
+    if (visible) {
+        btn.classList.add('show');
+    } else {
+        btn.classList.remove('show');
+    }
+}
+
+function updateAutoScrollByPosition() {
+    const nearBottom = isNearBottom();
+    state.autoScroll = nearBottom;
+
+    const messagesContainer = document.getElementById('messagesContainer');
+    const hasMessages = messagesContainer && messagesContainer.children.length > 0;
+
+    setScrollBottomButtonVisible(hasMessages && !nearBottom);
+}
+
+function scrollToBottom(options = {}) {
+    const { force = false, smooth = false } = options;
+
+    if (!force && !state.autoScroll) {
+        setScrollBottomButtonVisible(true);
+        return;
+    }
+
+    if (force) {
+        state.autoScroll = true;
+    }
+
     requestAnimationFrame(() => {
         const area = document.getElementById('chatArea');
-        area.scrollTop = area.scrollHeight;
+        if (!area) return;
+
+        if (smooth) {
+            area.scrollTo({
+                top: area.scrollHeight,
+                behavior: 'smooth',
+            });
+        } else {
+            area.scrollTop = area.scrollHeight;
+        }
+
+        setScrollBottomButtonVisible(false);
     });
 }
 
@@ -727,7 +785,8 @@ async function saveEdit(bubble) {
     // 添加新的空助手气泡
     const assistantBubble = addMessageBubble('assistant', '');
     const newContentEl = assistantBubble.querySelector('.message-content');
-    scrollToBottom();
+    state.autoScroll = true;
+    scrollToBottom({ force: true });
 
     try {
         const response = await fetch(`/api/chat/edit/${messageId}`, {
@@ -800,7 +859,8 @@ async function handleRegenerate(btn) {
     container.appendChild(newBubble);
 
     const newContentEl = newBubble.querySelector('.message-content');
-    scrollToBottom();
+    state.autoScroll = true;
+    scrollToBottom({ force: true });
 
     try {
         const response = await fetch(`/api/chat/regenerate/${messageId}`, {
@@ -868,6 +928,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const sidebarToggle = document.getElementById('sidebarToggle');
     const sidebarExpandBtn = document.getElementById('sidebarExpandBtn');
     const sidebar = document.getElementById('sidebar');
+    const scrollBottomBtn = document.getElementById('scrollBottomBtn');
 
     // === 登录 ===
     usernameInput.addEventListener('keydown', (e) => {
@@ -1011,6 +1072,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (isMobile()) {
         collapseSidebar();
     }
+
+    // === 滚动事件 ===
+    const chatArea = document.getElementById('chatArea');
+
+    chatArea.addEventListener('scroll', () => {
+        updateAutoScrollByPosition();
+    });
+
+    scrollBottomBtn.addEventListener('click', () => {
+        state.autoScroll = true;
+        scrollToBottom({ force: true });
+    });
 
     // === 侧边栏会话点击 ===
     chatList.addEventListener('click', async (e) => {
@@ -1215,7 +1288,8 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('greetingContainer').style.display = 'none';
 
             await loadSessionMessages(sessionId);
-            scrollToBottom();
+            state.autoScroll = true;
+            scrollToBottom({ force: true });
             renderSessionList();
         } catch {
             // 会话不存在，回到首页

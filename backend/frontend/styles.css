@@ -39,11 +39,18 @@ body.dark-mode {
 /* ==================== 全局重置 ==================== */
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
+html {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
 body {
     font-family: var(--font-family);
     background-color: var(--bg-main);
     color: var(--text-primary);
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     transition: background-color 0.3s, color 0.3s;
     -webkit-font-smoothing: antialiased;
@@ -95,8 +102,9 @@ body {
 
 /* ==================== 主布局 ==================== */
 .app-container {
-    display: flex; height: 100%; width: 100%;
+    display: flex; height: 100vh; height: 100dvh; width: 100%;
     position: relative;
+    overflow: hidden;
 }
 
 /* ==================== 侧边栏 ==================== */
@@ -108,6 +116,9 @@ body {
     transition: width 0.3s, min-width 0.3s, max-width 0.3s,
                 background-color 0.3s, border-color 0.3s, opacity 0.3s;
     overflow: hidden; z-index: 50;
+    height: 100%;
+    max-height: 100dvh;
+    min-height: 0;
 }
 .sidebar.collapsed {
     width: 0; min-width: 0; max-width: 0;
@@ -224,7 +235,9 @@ body {
 
 /* --- 侧边栏底部（固定不收缩） --- */
 .sidebar-bottom {
-    padding: 16px; flex-shrink: 0;
+    padding: 16px;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+    flex-shrink: 0;
 }
 .user-profile-container { position: relative; }
 .user-profile-btn {
@@ -240,6 +253,43 @@ body {
 .main-content {
     flex: 1; display: flex; flex-direction: column;
     min-width: 0;
+    position: relative;
+}
+
+.scroll-bottom-btn {
+    position: absolute;
+    right: 24px;
+    bottom: calc(96px + env(safe-area-inset-bottom));
+
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+
+    border: 1px solid var(--border-color);
+    background-color: var(--input-bg);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-md);
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    cursor: pointer;
+
+    opacity: 0;
+    pointer-events: none;
+    z-index: 30;
+
+    transition: opacity 0.15s, background-color 0.15s;
+}
+
+.scroll-bottom-btn.show {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.scroll-bottom-btn:hover {
+    background-color: var(--hover-bg);
 }
 .chat-area {
     flex: 1; overflow-y: auto;
@@ -263,6 +313,8 @@ body {
     display: flex; flex-direction: column; gap: 0;
     padding: 24px 0; width: 100%;
     max-width: 800px; margin: 0 auto;
+    box-sizing: border-box;
+    min-width: 0;
 }
 
 /* 消息气泡 — 无背景无头像无昵称，纯文字靠左/靠右 */
@@ -270,6 +322,9 @@ body {
     display: flex;
     flex-direction: column;
     padding: 8px 24px;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
 }
 .message-bubble.user { align-items: flex-end; }
 .message-bubble.user .message-content {
@@ -277,14 +332,30 @@ body {
     background-color: var(--hover-bg);
     border-radius: 18px;
     padding: 10px 16px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 .message-bubble.assistant { align-items: flex-start; }
+.message-bubble.assistant .message-content {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+}
 
 .message-content {
     min-width: 0;
     font-size: 15px; line-height: 1.7;
     color: var(--text-primary);
     word-wrap: break-word; overflow-wrap: break-word;
+}
+
+.main-content,
+.chat-area,
+.messages-container,
+.message-bubble,
+.message-content {
+    min-width: 0;
 }
 .message-content p { margin: 0 0 0.75em; }
 .message-content p:last-child { margin-bottom: 0; }
@@ -327,11 +398,19 @@ body {
     border-radius: var(--radius-md);
     padding: 16px; overflow-x: auto;
     margin: 0.75em 0;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
 }
 .message-content pre code {
     background: none; padding: 0;
     font-size: 13px; line-height: 1.6;
     color: #d4d4d4;
+    display: block;
+    min-width: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 .message-content img { max-width: 100%; border-radius: var(--radius-sm); }
 
@@ -557,14 +636,76 @@ body.dark-mode .text-danger:hover { background-color: rgba(239, 68, 68, 0.15) !i
 
 /* ==================== 响应式 ==================== */
 @media (max-width: 768px) {
+    .app-container {
+        height: 100dvh;
+    }
+
     .sidebar {
-        position: fixed; left: 0; top: 0; bottom: 0; z-index: 50;
+        position: fixed;
+        left: 0;
+        top: 0;
+        bottom: auto;
+        height: 100dvh;
+        max-height: 100dvh;
+        z-index: 50;
+
+        width: min(260px, 86vw);
+        min-width: min(260px, 86vw);
+        max-width: min(260px, 86vw);
+    }
+    .sidebar.collapsed {
+        width: 0;
+        min-width: 0;
+        max-width: 0;
     }
     .sidebar:not(.collapsed) { box-shadow: var(--shadow-lg); }
 
-    .message-bubble { padding: 12px 16px; }
+    .message-bubble { padding: 12px 20px 0 20px; }
     .input-area { padding: 12px 8px; }
-    .messages-container { padding: 12px 0; }
+    .messages-container {
+        padding: 12px 0;
+        max-width: 100%;
+    }
     .greeting-text { font-size: 22px; }
     .login-card { padding: 24px 20px; }
+
+    .message-content pre {
+        padding: 12px;
+    }
+
+    .message-bubble.user .message-content {
+        max-width: 86%;
+    }
+
+    .input-container {
+        min-width: 0;
+    }
+
+    .main-input {
+        min-width: 0;
+    }
+
+    .model-selector-btn {
+        max-width: 34vw;
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .model-selector-btn span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .model-dropdown {
+        left: auto;
+        right: 0;
+        min-width: min(240px, calc(100vw - 24px));
+        max-width: calc(100vw - 24px);
+    }
+
+    .scroll-bottom-btn {
+        right: 12px;
+        bottom: calc(82px + env(safe-area-inset-bottom));
+    }
 }
