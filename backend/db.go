@@ -134,6 +134,10 @@ func (d *DB) ListSessions(userID string) ([]Session, error) {
 		}
 		sessions = append(sessions, s)
 	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return sessions, nil
 }
 
@@ -190,6 +194,10 @@ func (d *DB) GetMessages(sessionID string) ([]Message, error) {
 		}
 		messages = append(messages, m)
 	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return messages, nil
 }
 
@@ -202,12 +210,17 @@ func (d *DB) AddMessage(sessionID, role, content string) (*Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	id, _ := result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
 
-	d.conn.Exec("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", sessionID)
+	if _, err := d.conn.Exec("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", sessionID); err != nil {
+		return nil, err
+	}
 
 	if role == "user" {
-		d.conn.Exec(
+		_, _ = d.conn.Exec(
 			"UPDATE sessions SET title = ? WHERE id = ? AND title = '新对话'",
 			truncateTitle(content, 30), sessionID,
 		)

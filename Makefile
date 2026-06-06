@@ -21,19 +21,19 @@ $(LIBS_DIR):
 
 $(LIBS_DIR)/marked.min.js: | $(LIBS_DIR)
 	@echo "Downloading marked.js $(MARKED_VER)..."
-	curl -sL -o $@ https://cdn.jsdelivr.net/npm/marked@$(MARKED_VER)/marked.min.js
+	curl -fsSL -o $@ https://cdn.jsdelivr.net/npm/marked@$(MARKED_VER)/marked.min.js
 
 $(LIBS_DIR)/highlight.min.js: | $(LIBS_DIR)
 	@echo "Downloading highlight.js $(HLJS_VER)..."
-	curl -sL -o $@ https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@$(HLJS_VER)/highlight.min.js
+	curl -fsSL -o $@ https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@$(HLJS_VER)/highlight.min.js
 
 $(LIBS_DIR)/github-dark.min.css: | $(LIBS_DIR)
 	@echo "Downloading github-dark theme..."
-	curl -sL -o $@ https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@$(HLJS_VER)/styles/github-dark.min.css
+	curl -fsSL -o $@ https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@$(HLJS_VER)/styles/github-dark.min.css
 
 $(LIBS_DIR)/purify.min.js: | $(LIBS_DIR)
 	@echo "Downloading DOMPurify $(DOMPURIFY_VER)..."
-	curl -sL -o $@ https://cdn.jsdelivr.net/npm/dompurify@$(DOMPURIFY_VER)/dist/purify.min.js
+	curl -fsSL -o $@ https://cdn.jsdelivr.net/npm/dompurify@$(DOMPURIFY_VER)/dist/purify.min.js
 
 # 编译 Go 后端
 build: deps

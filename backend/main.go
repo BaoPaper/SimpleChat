@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -28,6 +29,15 @@ func main() {
 		log.Fatalf("加载 models.json 失败: %v", err)
 	}
 
+	// 配置校验
+	if err := settings.Validate(); err != nil {
+		log.Fatalf("settings.json 配置错误: %v", err)
+	}
+
+	if err := modelsConfig.Validate(); err != nil {
+		log.Fatalf("models.json 配置错误: %v", err)
+	}
+
 	// 确保 data 目录存在
 	dataDir := filepath.Dir(settings.DatabasePath)
 	if dataDir != "." {
@@ -46,6 +56,9 @@ func main() {
 	// 创建 OpenAI 服务
 	openaiService := &OpenAIService{
 		ModelsConfig: modelsConfig,
+		client: &http.Client{
+			Timeout: 5 * time.Minute,
+		},
 	}
 
 	// 创建处理器

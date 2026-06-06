@@ -135,7 +135,15 @@ func (h *Handler) UpdateSession(c *gin.Context) {
 
 	// 校验所有权
 	session, _, err := h.DB.GetSession(id)
-	if err != nil || session == nil || session.UserID != username {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取会话失败"})
+		return
+	}
+	if session == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+	if session.UserID != username {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权操作此会话"})
 		return
 	}
@@ -161,7 +169,15 @@ func (h *Handler) DeleteSession(c *gin.Context) {
 	id := c.Param("id")
 
 	session, _, err := h.DB.GetSession(id)
-	if err != nil || session == nil || session.UserID != username {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取会话失败"})
+		return
+	}
+	if session == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+	if session.UserID != username {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权操作此会话"})
 		return
 	}
@@ -188,22 +204,12 @@ func (h *Handler) Chat(c *gin.Context) {
 		return
 	}
 
-	if req.Model == "" {
-		req.Model = h.ModelsConfig.DefaultModel
-	}
-
-	// 验证模型
-	modelValid := req.Model == h.ModelsConfig.DefaultModel
-	for _, m := range h.ModelsConfig.Models {
-		if m.ID == req.Model {
-			modelValid = true
-			break
-		}
-	}
-	if !modelValid {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的模型: " + req.Model})
+	model, err := h.normalizeModel(req.Model)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	req.Model = model
 
 	// 检查或创建会话
 	var sessionID string
@@ -283,7 +289,15 @@ func (h *Handler) EditChat(c *gin.Context) {
 
 	// 校验会话所有权
 	session, _, err := h.DB.GetSession(req.SessionID)
-	if err != nil || session == nil || session.UserID != username {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取会话失败"})
+		return
+	}
+	if session == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+	if session.UserID != username {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权操作此会话"})
 		return
 	}
@@ -325,9 +339,10 @@ func (h *Handler) EditChat(c *gin.Context) {
 	}
 
 	// 选择模型
-	model := req.Model
-	if model == "" {
-		model = h.ModelsConfig.DefaultModel
+	model, err := h.normalizeModel(req.Model)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
 	// 构建消息上下文
@@ -355,6 +370,12 @@ func (h *Handler) RegenerateChat(c *gin.Context) {
 		return
 	}
 
+	var req struct {
+		SessionID string `json:"session_id"`
+		Model     string `json:"model"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
 	// 获取要删除的消息
 	msg, err := h.DB.GetMessageByID(messageID)
 	if err != nil || msg == nil {
@@ -366,9 +387,23 @@ func (h *Handler) RegenerateChat(c *gin.Context) {
 		return
 	}
 
+	// 如果传了 session_id，校验与消息所属会话一致
+	if req.SessionID != "" && req.SessionID != msg.SessionID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "消息不属于当前会话"})
+		return
+	}
+
 	// 校验会话所有权
 	session, _, err := h.DB.GetSession(msg.SessionID)
-	if err != nil || session == nil || session.UserID != username {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取会话失败"})
+		return
+	}
+	if session == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+	if session.UserID != username {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权操作此会话"})
 		return
 	}
@@ -388,11 +423,28 @@ func (h *Handler) RegenerateChat(c *gin.Context) {
 
 	chatMessages := buildChatMessages(h.Settings.SystemPrompt, messages)
 
-	// 使用默认模型
-	model := h.ModelsConfig.DefaultModel
+	// 使用指定模型或默认模型
+	model, err := h.normalizeModel(req.Model)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	// 流式响应（RegenerateChat，userMsgID=0，不需要清理）
 	h.streamChatToSSE(c, msg.SessionID, model, chatMessages, 0, false)
+}
+
+// normalizeModel 统一模型校验
+func (h *Handler) normalizeModel(model string) (string, error) {
+	if model == "" {
+		model = h.ModelsConfig.DefaultModel
+	}
+	for _, m := range h.ModelsConfig.Models {
+		if m.ID == model {
+			return model, nil
+		}
+	}
+	return "", fmt.Errorf("不支持的模型: %s", model)
 }
 
 // buildChatMessages 构建发送给 OpenAI 的消息列表

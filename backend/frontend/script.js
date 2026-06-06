@@ -164,6 +164,11 @@ async function renameSession(id, title) {
 
 async function loadSessionMessages(id) {
     const data = await apiJSON(`/api/sessions/${id}`);
+
+    if (state.currentSessionId !== id) {
+        return;
+    }
+
     state.messages = data.messages || [];
     renderMessages();
 }
@@ -806,6 +811,7 @@ async function handleRegenerate(btn) {
             },
             body: JSON.stringify({
                 session_id: sessionId,
+                model: state.currentModel,
             }),
         });
 

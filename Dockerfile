@@ -9,10 +9,10 @@ WORKDIR /build
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 RUN mkdir -p frontend/libs && \
-    curl -sL -o frontend/libs/marked.min.js https://cdn.jsdelivr.net/npm/marked@15.0.4/marked.min.js && \
-    curl -sL -o frontend/libs/highlight.min.js https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.11.1/highlight.min.js && \
-    curl -sL -o frontend/libs/github-dark.min.css https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.11.1/styles/github-dark.min.css && \
-    curl -sL -o frontend/libs/purify.min.js https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js
+    curl -fsSL -o frontend/libs/marked.min.js https://cdn.jsdelivr.net/npm/marked@15.0.4/marked.min.js && \
+    curl -fsSL -o frontend/libs/highlight.min.js https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.11.1/highlight.min.js && \
+    curl -fsSL -o frontend/libs/github-dark.min.css https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.11.1/styles/github-dark.min.css && \
+    curl -fsSL -o frontend/libs/purify.min.js https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js
 
 COPY backend/ .
 RUN CGO_ENABLED=1 go build -o simplechat .

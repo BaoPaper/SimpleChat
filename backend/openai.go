@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // OpenAIService OpenAI API 服务
@@ -19,11 +18,6 @@ type OpenAIService struct {
 }
 
 func (s *OpenAIService) getClient() *http.Client {
-	if s.client == nil {
-		s.client = &http.Client{
-			Timeout: 5 * time.Minute,
-		}
-	}
 	return s.client
 }
 
@@ -81,7 +75,9 @@ func (s *OpenAIService) StreamChat(ctx context.Context, model string, messages [
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+s.ModelsConfig.APIKey)
+		if s.ModelsConfig.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+s.ModelsConfig.APIKey)
+		}
 		req.Header.Set("Accept", "text/event-stream")
 
 		resp, err := s.getClient().Do(req)
