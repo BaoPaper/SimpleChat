@@ -519,6 +519,14 @@ body {
     content: "▊";
     animation: blink 1s infinite;
 }
+
+/* streaming 消息内容后有光标闪烁（即使已有部分内容） */
+.message-bubble.assistant.streaming .message-content::after {
+    content: "▊";
+    animation: blink 1s infinite;
+    margin-left: 2px;
+}
+
 @keyframes blink {
     0%, 50% { opacity: 1; }
     51%, 100% { opacity: 0; }

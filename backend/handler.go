@@ -454,6 +454,9 @@ func buildChatMessages(systemPrompt string, messages []Message) []ChatMessage {
 		chatMessages = append(chatMessages, ChatMessage{Role: "system", Content: systemPrompt})
 	}
 	for _, m := range messages {
+		if m.Status == "error" {
+			continue
+		}
 		chatMessages = append(chatMessages, ChatMessage{Role: m.Role, Content: m.Content})
 	}
 	return chatMessages
@@ -509,7 +512,7 @@ func (h *Handler) streamChatToSSE(
 		"assistant_message_id": assistantMsgID,
 	}
 	if userMsgID > 0 {
-		metaData["message_id"] = userMsgID
+		metaData["user_message_id"] = userMsgID
 	}
 	if connected {
 		if err := sendSSE(c.Writer, flusher, "meta", metaData); err != nil {
@@ -521,6 +524,9 @@ func (h *Handler) streamChatToSSE(
 
 	var fullContent strings.Builder
 	var finalErr error
+
+	lastPersist := time.Now()
+	const persistInterval = 500 * time.Millisecond
 
 	for contentCh != nil || errCh != nil {
 		select {
@@ -535,6 +541,23 @@ func (h *Handler) streamChatToSSE(
 				continue
 			}
 			fullContent.WriteString(content)
+
+			// 定期持久化生成进度
+			if time.Since(lastPersist) >= persistInterval {
+				updated, persistErr := h.DB.UpdateAssistantStreamingContent(sessionID, assistantMsgID, fullContent.String())
+				if persistErr != nil {
+					// 写进度失败，不要误判为占位被删除，记录后继续
+					fmt.Printf("保存生成进度失败: %v\n", persistErr)
+					lastPersist = time.Now()
+				} else if !updated {
+					// 只有没有 DB 错误且确实没更新到行，才认为占位被删除
+					cancel()
+					return
+				} else {
+					lastPersist = time.Now()
+				}
+			}
+
 			if connected {
 				if err := sendSSE(c.Writer, flusher, "content", content); err != nil {
 					connected = false
@@ -552,12 +575,26 @@ func (h *Handler) streamChatToSSE(
 		}
 	}
 
+	// 最后确保持久化最新内容
+	assistantContent := fullContent.String()
+	if assistantContent != "" {
+		if updated, persistErr := h.DB.UpdateAssistantStreamingContent(sessionID, assistantMsgID, assistantContent); persistErr != nil {
+			fmt.Printf("保存最终生成进度失败: %v\n", persistErr)
+		} else if !updated {
+			// 占位消息已被删除，任务失效
+			return
+		}
+	}
+
 	// LLM 完成后处理结果
 	if finalErr != nil {
-		// 把占位消息更新为错误文本，避免留下永久空消息
 		errText := "错误: " + finalErr.Error()
-		if _, updateErr := h.DB.UpdateAssistantMessageContent(sessionID, assistantMsgID, errText); updateErr == nil {
-			// 更新成功或占位已被删除都算正常
+		if assistantContent != "" {
+			errText = assistantContent + "\n\n" + errText
+		}
+
+		if _, updateErr := h.DB.FailAssistantMessage(sessionID, assistantMsgID, errText); updateErr != nil {
+			fmt.Printf("标记 assistant 消息失败: %v\n", updateErr)
 		}
 		if connected {
 			_ = sendSSE(c.Writer, flusher, "error", finalErr.Error())
@@ -565,9 +602,9 @@ func (h *Handler) streamChatToSSE(
 		return
 	}
 
-	assistantContent := fullContent.String()
 	if assistantContent == "" {
-		if _, updateErr := h.DB.UpdateAssistantMessageContent(sessionID, assistantMsgID, "错误: AI 未返回内容"); updateErr == nil {
+		if _, updateErr := h.DB.FailAssistantMessage(sessionID, assistantMsgID, "错误: AI 未返回内容"); updateErr != nil {
+			fmt.Printf("标记 assistant 空回复失败: %v\n", updateErr)
 		}
 		if connected {
 			_ = sendSSE(c.Writer, flusher, "error", "AI 未返回内容")
@@ -575,8 +612,8 @@ func (h *Handler) streamChatToSSE(
 		return
 	}
 
-	// 更新占位消息为完整回复（而不是新建一条）
-	updated, err := h.DB.UpdateAssistantMessageContent(sessionID, assistantMsgID, assistantContent)
+	// 完成 assistant 回复
+	updated, err := h.DB.FinishAssistantMessage(sessionID, assistantMsgID, assistantContent)
 	if err != nil {
 		if connected {
 			_ = sendSSE(c.Writer, flusher, "error", "保存回复失败")
@@ -584,7 +621,7 @@ func (h *Handler) streamChatToSSE(
 		return
 	}
 	if !updated {
-		// 占位消息已被删除（用户编辑/重发导致旧任务失效），静默结束
+		fmt.Printf("assistant 消息已失效，跳过完成: session=%s message=%d\n", sessionID, assistantMsgID)
 		return
 	}
 

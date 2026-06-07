@@ -49,7 +49,12 @@ config/
 | 表 | 字段 | 用途 |
 |----|------|------|
 | `sessions` | id, user_id, title, created_at, updated_at | 会话列表 |
-| `messages` | id, session_id, role, content, created_at | 聊天消息 |
+| `messages` | id, session_id, role, content, status, created_at | 聊天消息 |
+
+status 字段取值：
+- `done` — 普通已完成消息（默认值）
+- `streaming` — 生成中的 assistant 片段，支持断线重连后继续显示
+- `error` — 生成失败（如服务重启时清理遗留任务）
 
 **不要放进数据库的东西：**
 - 用户和密码（放在 `settings.json`）

@@ -25,6 +25,7 @@ type Message struct {
 	SessionID string    `json:"session_id"`
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
+	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -53,39 +54,96 @@ func InitDB(path string) (*DB, error) {
 	return d, nil
 }
 
-func (d *DB) migrate() error {
-	query := `
-	CREATE TABLE IF NOT EXISTS sessions (
-		id TEXT PRIMARY KEY,
-		user_id TEXT NOT NULL DEFAULT '',
-		title TEXT NOT NULL DEFAULT '新对话',
-		created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-		updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-	);
+func (d *DB) columnExists(table, column string) (bool, error) {
+	rows, err := d.conn.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
 
-	CREATE TABLE IF NOT EXISTS messages (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		session_id TEXT NOT NULL,
-		role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
-		content TEXT NOT NULL DEFAULT '',
-		created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-	);
-
-	-- 清理服务重启遗留的空 assistant 占位（必须在唯一索引之前，避免历史重复数据导致失败）
-	UPDATE messages
-	SET content = '错误: 服务重启，生成中断'
-	WHERE role = 'assistant' AND content = '';
-
-	CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
-
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_pending_assistant_per_session
-	ON messages(session_id) WHERE role = 'assistant' AND content = '';
-	`
-	_, err := d.conn.Exec(query)
-	return err
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dfltValue *string
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
+func (d *DB) migrate() error {
+	// 1. 创建基础表（新表定义已包含 status 字段）
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '新对话',
+			created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`CREATE TABLE IF NOT EXISTS messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+			content TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'done' CHECK(status IN ('done', 'streaming', 'error')),
+			created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id)`,
+	}
+
+	for _, q := range queries {
+		if _, err := d.conn.Exec(q); err != nil {
+			return err
+		}
+	}
+
+	// 2. 检查旧表是否缺少 status 字段
+	hasStatus, err := d.columnExists("messages", "status")
+	if err != nil {
+		return err
+	}
+	if !hasStatus {
+		if _, err := d.conn.Exec("ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'done'"); err != nil {
+			return err
+		}
+	}
+
+	// 3. 废弃旧索引（按空 content 判断）
+	_, _ = d.conn.Exec("DROP INDEX IF EXISTS idx_one_pending_assistant_per_session")
+
+	// 4. 清理服务重启遗留的 streaming 消息（在创建唯一索引之前，避免异常数据导致索引失败）
+	if _, err := d.conn.Exec(`
+		UPDATE messages
+		SET status = 'error',
+			content = CASE
+				WHEN content = '' THEN '错误: 服务重启，生成中断'
+				ELSE content || '
+
+错误: 服务重启，生成中断'
+			END
+		WHERE role = 'assistant'
+		  AND status = 'streaming'
+	`); err != nil {
+		return err
+	}
+
+	// 5. 创建新索引（按 status 判断）
+	if _, err := d.conn.Exec(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_one_streaming_assistant_per_session
+		 ON messages(session_id) WHERE role = 'assistant' AND status = 'streaming'`,
+	); err != nil {
+		return err
+	}
+
+	return nil
+}
 
 func genID() (string, error) {
 	b := make([]byte, 16)
@@ -178,7 +236,7 @@ func (d *DB) DeleteSession(id string) error {
 // GetMessages 获取会话的所有消息（按时间顺序）
 func (d *DB) GetMessages(sessionID string) ([]Message, error) {
 	rows, err := d.conn.Query(
-		"SELECT id, session_id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY id ASC",
+		"SELECT id, session_id, role, content, status, created_at FROM messages WHERE session_id = ? ORDER BY id ASC",
 		sessionID,
 	)
 	if err != nil {
@@ -189,7 +247,7 @@ func (d *DB) GetMessages(sessionID string) ([]Message, error) {
 	var messages []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Status, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		messages = append(messages, m)
@@ -204,7 +262,7 @@ func (d *DB) GetMessages(sessionID string) ([]Message, error) {
 // AddMessage 添加消息
 func (d *DB) AddMessage(sessionID, role, content string) (*Message, error) {
 	result, err := d.conn.Exec(
-		"INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
+		"INSERT INTO messages (session_id, role, content, status) VALUES (?, ?, ?, 'done')",
 		sessionID, role, content,
 	)
 	if err != nil {
@@ -231,6 +289,7 @@ func (d *DB) AddMessage(sessionID, role, content string) (*Message, error) {
 		SessionID: sessionID,
 		Role:      role,
 		Content:   content,
+		Status:    "done",
 		CreatedAt: time.Now(),
 	}, nil
 }
@@ -282,8 +341,8 @@ func (d *DB) DeleteMessagesFrom(sessionID string, fromID int64) error {
 func (d *DB) GetMessageByID(id int64) (*Message, error) {
 	var m Message
 	err := d.conn.QueryRow(
-		"SELECT id, session_id, role, content, created_at FROM messages WHERE id = ?", id,
-	).Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.CreatedAt)
+		"SELECT id, session_id, role, content, status, created_at FROM messages WHERE id = ?", id,
+	).Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Status, &m.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -293,16 +352,54 @@ func (d *DB) GetMessageByID(id int64) (*Message, error) {
 	return &m, nil
 }
 
-// AddAssistantPlaceholder 创建一条空的 assistant 占位消息，表示有回复正在生成
+// AddAssistantPlaceholder 创建一条 streaming assistant 占位消息
 func (d *DB) AddAssistantPlaceholder(sessionID string) (*Message, error) {
-	return d.AddMessage(sessionID, "assistant", "")
+	result, err := d.conn.Exec(
+		"INSERT INTO messages (session_id, role, content, status) VALUES (?, 'assistant', '', 'streaming')",
+		sessionID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := d.conn.Exec("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", sessionID); err != nil {
+		return nil, err
+	}
+
+	return &Message{
+		ID:        id,
+		SessionID: sessionID,
+		Role:      "assistant",
+		Content:   "",
+		Status:    "streaming",
+		CreatedAt: time.Now(),
+	}, nil
 }
 
-// UpdateAssistantMessageContent 更新指定 assistant 占位消息的内容
-// 返回 bool 表示是否真的更新到了行（如果占位已被删除则返回 false）
-func (d *DB) UpdateAssistantMessageContent(sessionID string, messageID int64, content string) (bool, error) {
+// UpdateAssistantStreamingContent 增量更新 streaming 消息的内容（不更新 session updated_at）
+func (d *DB) UpdateAssistantStreamingContent(sessionID string, messageID int64, content string) (bool, error) {
 	result, err := d.conn.Exec(
-		"UPDATE messages SET content = ? WHERE id = ? AND session_id = ? AND role = 'assistant'",
+		"UPDATE messages SET content = ? WHERE id = ? AND session_id = ? AND role = 'assistant' AND status = 'streaming'",
+		content, messageID, sessionID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// FinishAssistantMessage 完成 assistant 消息（标记为 done）
+func (d *DB) FinishAssistantMessage(sessionID string, messageID int64, content string) (bool, error) {
+	result, err := d.conn.Exec(
+		"UPDATE messages SET content = ?, status = 'done' WHERE id = ? AND session_id = ? AND role = 'assistant' AND status = 'streaming'",
 		content, messageID, sessionID,
 	)
 	if err != nil {
@@ -314,21 +411,40 @@ func (d *DB) UpdateAssistantMessageContent(sessionID string, messageID int64, co
 	}
 	updated := n > 0
 	if updated {
-		if _, err := d.conn.Exec(
-			"UPDATE sessions SET updated_at = datetime('now') WHERE id = ?",
-			sessionID,
-		); err != nil {
+		if _, err := d.conn.Exec("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", sessionID); err != nil {
 			return false, err
 		}
 	}
 	return updated, nil
 }
 
-// HasPendingAssistant 检查同一 session 中是否存在正在生成中的 assistant 占位消息
+// FailAssistantMessage 标记 assistant 消息失败（status = error）
+func (d *DB) FailAssistantMessage(sessionID string, messageID int64, content string) (bool, error) {
+	result, err := d.conn.Exec(
+		"UPDATE messages SET content = ?, status = 'error' WHERE id = ? AND session_id = ? AND role = 'assistant' AND status = 'streaming'",
+		content, messageID, sessionID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	updated := n > 0
+	if updated {
+		if _, err := d.conn.Exec("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", sessionID); err != nil {
+			return false, err
+		}
+	}
+	return updated, nil
+}
+
+// HasPendingAssistant 检查同一 session 中是否存在正在生成中的 assistant 消息
 func (d *DB) HasPendingAssistant(sessionID string) (bool, error) {
 	var exists bool
 	err := d.conn.QueryRow(
-		"SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = ? AND role = 'assistant' AND content = '')",
+		"SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = ? AND role = 'assistant' AND status = 'streaming')",
 		sessionID,
 	).Scan(&exists)
 	if err != nil {

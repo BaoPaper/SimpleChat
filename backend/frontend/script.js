@@ -10,7 +10,8 @@ const state = {
     models: [],
     defaultModel: '',
     currentModel: '',
-    isStreaming: false,
+    activeSSE: false,
+    isReconnectPolling: false,
     autoScroll: true,
 };
 
@@ -79,6 +80,7 @@ async function login(username, password) {
 }
 
 function logout() {
+    stopGeneratingState();
     state.token = '';
     state.username = '';
     localStorage.removeItem('simplechat_token');
@@ -145,6 +147,7 @@ async function deleteSession(id) {
     await apiJSON(`/api/sessions/${id}`, { method: 'DELETE' });
     state.sessions = state.sessions.filter(s => s.id !== id);
     if (state.currentSessionId === id) {
+        stopGeneratingState();
         state.currentSessionId = null;
         state.messages = [];
         syncURL(null);
@@ -172,9 +175,18 @@ async function loadSessionMessages(id) {
 
     state.messages = data.messages || [];
     renderMessages();
+
+    const hasStreaming = hasStreamingMessage(state.messages);
+
+    if (hasStreaming && !state.activeSSE) {
+        startReconnectPolling(id);
+    } else if (!hasStreaming) {
+        stopReconnectPolling();
+    }
 }
 
 function switchSession(id, options = {}) {
+    stopReconnectPolling();
     const { pushHistory = false } = options;
     state.currentSessionId = id;
     localStorage.setItem('simplechat_last_session', id);
@@ -241,7 +253,7 @@ function renderModelDropdown() {
 
 // ---- 聊天 ----
 async function sendMessage() {
-    if (state.isStreaming) return;
+    if (state.activeSSE || state.isReconnectPolling) return;
 
     const input = document.getElementById('chatInput');
     const message = input.value.trim();
@@ -253,7 +265,7 @@ async function sendMessage() {
 
     input.value = '';
     input.style.height = 'auto';
-    document.getElementById('sendBtn').setAttribute('disabled', 'true');
+    updateSendButtonState();
 
     const userBubble = addMessageBubble('user', message);
     state.autoScroll = true;
@@ -263,7 +275,9 @@ async function sendMessage() {
     const contentEl = assistantBubble.querySelector('.message-content');
     scrollToBottom({ force: true });
 
-    state.isStreaming = true;
+    state.activeSSE = true;
+    updateSendButtonState();
+    let needRecover = false;
 
     try {
         const response = await fetch('/api/chat', {
@@ -302,9 +316,18 @@ async function sendMessage() {
     } catch (err) {
         contentEl.innerHTML = `<span class="error-text">错误: ${escapeHtml(err.message)}</span>`;
         console.error('Chat error:', err);
+        needRecover = true;
     }
 
-    state.isStreaming = false;
+    state.activeSSE = false;
+
+    if (needRecover) {
+        await recoverStreamingSession(state.currentSessionId);
+    } else {
+        stopReconnectPolling();
+        updateSendButtonState();
+    }
+
     scrollToBottom();
     loadSessions();
 }
@@ -339,7 +362,12 @@ async function streamChatSSE(response, contentEl) {
                 switch (event.type) {
                     case 'meta':
                         if (event.session_id) sessionId = event.session_id;
-                        if (event.message_id) userMessageId = String(event.message_id);
+                        if (event.user_message_id) {
+                            userMessageId = String(event.user_message_id);
+                        }
+                        if (event.assistant_message_id) {
+                            assistantMessageId = String(event.assistant_message_id);
+                        }
                         break;
                     case 'content':
                         const currentText = contentEl.getAttribute('data-raw') || '';
@@ -449,7 +477,8 @@ function createMessageActions(role) {
     return actions;
 }
 
-function renderMessages() {
+function renderMessages(options = {}) {
+    const { scroll = true } = options;
     const container = document.getElementById('messagesContainer');
     const greeting = document.getElementById('greetingContainer');
 
@@ -466,7 +495,7 @@ function renderMessages() {
 
     for (const msg of state.messages) {
         const div = document.createElement('div');
-        div.className = `message-bubble ${msg.role}`;
+        div.className = `message-bubble ${msg.role}${msg.role === 'assistant' && msg.status === 'streaming' ? ' streaming' : ''}`;
         div.dataset.messageId = msg.id;
 
         const contentDiv = document.createElement('div');
@@ -484,8 +513,10 @@ function renderMessages() {
         container.appendChild(div);
     }
 
-    state.autoScroll = true;
-    scrollToBottom({ force: true });
+    if (scroll) {
+        state.autoScroll = true;
+        scrollToBottom({ force: true });
+    }
 }
 
 // ---- Markdown 渲染 ----
@@ -571,6 +602,86 @@ function showApp() {
     document.getElementById('appContainer').style.display = 'flex';
     document.getElementById('displayName').textContent = state.username || '用户';
     document.getElementById('chatInput').removeAttribute('disabled');
+}
+
+// ---- 持久会话重连轮询 ----
+let reconnectPollingTimer = null;
+
+function hasStreamingMessage(messages = state.messages) {
+    return messages.some(m => m.role === 'assistant' && m.status === 'streaming');
+}
+
+function updateSendButtonState() {
+    const input = document.getElementById('chatInput');
+    const sendBtn = document.getElementById('sendBtn');
+    if (!input || !sendBtn) return;
+
+    const disabled = state.activeSSE || state.isReconnectPolling || input.value.trim().length === 0;
+    if (disabled) {
+        sendBtn.setAttribute('disabled', 'true');
+    } else {
+        sendBtn.removeAttribute('disabled');
+    }
+}
+
+function stopReconnectPolling() {
+    if (reconnectPollingTimer) {
+        clearInterval(reconnectPollingTimer);
+        reconnectPollingTimer = null;
+    }
+    state.isReconnectPolling = false;
+    updateSendButtonState();
+}
+
+function stopGeneratingState() {
+    stopReconnectPolling();
+    state.activeSSE = false;
+    updateSendButtonState();
+}
+
+function startReconnectPolling(sessionId) {
+    stopReconnectPolling();
+
+    state.isReconnectPolling = true;
+    updateSendButtonState();
+
+    reconnectPollingTimer = setInterval(async () => {
+        if (!state.currentSessionId || state.currentSessionId !== sessionId) {
+            stopReconnectPolling();
+            return;
+        }
+
+        try {
+            const data = await apiJSON(`/api/sessions/${sessionId}`);
+
+            if (state.currentSessionId !== sessionId) {
+                return;
+            }
+
+            state.messages = data.messages || [];
+            renderMessages({ scroll: state.autoScroll });
+
+            if (!hasStreamingMessage(state.messages)) {
+                stopReconnectPolling();
+                loadSessions();
+            }
+        } catch (err) {
+            console.error('轮询生成状态失败:', err);
+        }
+    }, 800);
+}
+
+async function recoverStreamingSession(sessionId) {
+    state.activeSSE = false;
+    updateSendButtonState();
+
+    if (!sessionId) return;
+
+    try {
+        await loadSessionMessages(sessionId);
+    } catch (err) {
+        console.error('恢复生成中会话失败:', err);
+    }
 }
 
 // ---- 辅助函数 ----
@@ -673,7 +784,7 @@ async function handleCopy(btn) {
 
 /** 进入编辑模式 */
 function enterEditMode(bubble) {
-    if (state.isStreaming) return;
+    if (state.activeSSE || state.isReconnectPolling) return;
     const contentEl = bubble.querySelector('.message-content');
     const rawText = contentEl.getAttribute('data-raw') || contentEl.textContent || '';
 
@@ -747,7 +858,7 @@ function cancelEdit(bubble) {
 
 /** 保存并发送编辑 */
 async function saveEdit(bubble) {
-    if (state.isStreaming) return;
+    if (state.activeSSE || state.isReconnectPolling) return;
     const textarea = bubble.querySelector('.edit-textarea');
     const newContent = textarea.value.trim();
     if (!newContent) return;
@@ -759,8 +870,9 @@ async function saveEdit(bubble) {
     if (!sessionId) return;
 
     // 禁用输入框，防止流式输出期间误发新消息
-    state.isStreaming = true;
-    document.getElementById('sendBtn').setAttribute('disabled', 'true');
+    state.activeSSE = true;
+    updateSendButtonState();
+    let needRecover = false;
 
     // 乐观更新：先更新 UI，再发请求
     const contentEl = bubble.querySelector('.message-content');
@@ -813,20 +925,25 @@ async function saveEdit(bubble) {
         }
     } catch (err) {
         console.error('Edit error:', err);
-        // 网络错误：从服务器拉取真实数据恢复界面
-        try {
-            await loadSessionMessages(sessionId);
-        } catch { /* ignore */ }
+        needRecover = true;
     }
 
-    state.isStreaming = false;
+    state.activeSSE = false;
+
+    if (needRecover) {
+        await recoverStreamingSession(sessionId);
+    } else {
+        stopReconnectPolling();
+        updateSendButtonState();
+    }
+
     scrollToBottom();
     loadSessions();
 }
 
 /** 重新生成 */
 async function handleRegenerate(btn) {
-    if (state.isStreaming) return;
+    if (state.activeSSE || state.isReconnectPolling) return;
     const bubble = btn.closest('.message-bubble');
     const messageId = bubble.dataset.messageId;
     if (!messageId) return;
@@ -834,8 +951,9 @@ async function handleRegenerate(btn) {
     if (!sessionId) return;
 
     // 禁用输入框，防止流式输出期间误发新消息
-    state.isStreaming = true;
-    document.getElementById('sendBtn').setAttribute('disabled', 'true');
+    state.activeSSE = true;
+    updateSendButtonState();
+    let needRecover = false;
 
     // 乐观更新：先更新 UI，再发请求
     let current = bubble;
@@ -886,13 +1004,18 @@ async function handleRegenerate(btn) {
         }
     } catch (err) {
         console.error('Regenerate error:', err);
-        // 网络错误：从服务器拉取真实数据恢复界面
-        try {
-            await loadSessionMessages(sessionId);
-        } catch { /* ignore */ }
+        needRecover = true;
     }
 
-    state.isStreaming = false;
+    state.activeSSE = false;
+
+    if (needRecover) {
+        await recoverStreamingSession(sessionId);
+    } else {
+        stopReconnectPolling();
+        updateSendButtonState();
+    }
+
     scrollToBottom();
     loadSessions();
 }
@@ -1024,7 +1147,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // === 新对话 ===
     newChatBtn.addEventListener('click', async () => {
-        if (state.isStreaming) return;
+        if (state.activeSSE) return;
         try {
             await createSession();
             chatInput.focus();
@@ -1109,6 +1232,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (action === 'rename') {
             e.stopPropagation();
             closeAllDropdowns();
+
+            if (state.activeSSE && sessionId === state.currentSessionId) {
+                alert('当前会话正在生成回复，请等待完成后再重命名');
+                return;
+            }
+
             const s = state.sessions.find(s => s.id === sessionId);
             const newTitle = prompt('请输入新名称:', s?.title || '');
             if (newTitle && newTitle.trim()) {
@@ -1120,6 +1249,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (action === 'delete') {
             e.stopPropagation();
             closeAllDropdowns();
+
+            if (state.activeSSE && sessionId === state.currentSessionId) {
+                alert('当前会话正在生成回复，请等待完成后再删除');
+                return;
+            }
+
             if (confirm('确定要删除这个对话吗？')) {
                 await deleteSession(sessionId);
             }
@@ -1127,7 +1262,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // 切换会话（用户主动点击，pushState 新增历史记录）
-        if (state.isStreaming) return;
+        if (state.activeSSE) return;
         switchSession(sessionId, { pushHistory: true });
     });
 
@@ -1160,12 +1295,7 @@ document.addEventListener('DOMContentLoaded', () => {
     chatInput.addEventListener('input', function() {
         this.style.height = 'auto';
         this.style.height = (this.scrollHeight) + 'px';
-
-        if (this.value.trim().length > 0 && !state.isStreaming) {
-            sendBtn.removeAttribute('disabled');
-        } else {
-            sendBtn.setAttribute('disabled', 'true');
-        }
+        updateSendButtonState();
     });
 
     chatInput.addEventListener('keydown', function(e) {
@@ -1179,7 +1309,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 this.dispatchEvent(new Event('input'));
             } else if (!e.shiftKey) {
                 e.preventDefault();
-                if (this.value.trim().length > 0 && !state.isStreaming) {
+                if (this.value.trim().length > 0 && !state.activeSSE && !state.isReconnectPolling) {
                     sendMessage();
                 }
             }
@@ -1187,7 +1317,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     sendBtn.addEventListener('click', () => {
-        if (chatInput.value.trim().length > 0 && !state.isStreaming) {
+        if (chatInput.value.trim().length > 0 && !state.activeSSE && !state.isReconnectPolling) {
             sendMessage();
         }
     });
@@ -1252,6 +1382,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // === 浏览器前进/后退（popstate） ===
     window.addEventListener('popstate', async (e) => {
+        if (state.activeSSE) {
+            syncURL(state.currentSessionId);
+            return;
+        }
+
         const sessionId = getSessionIdFromURL();
 
         if (!sessionId) {
