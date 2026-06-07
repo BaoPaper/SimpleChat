@@ -1,0 +1,128 @@
+name: Release Binaries
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            zig_target: x86_64-linux-musl
+            ext: tar.gz
+            binary_name: simplechat
+          - goos: linux
+            goarch: arm64
+            zig_target: aarch64-linux-musl
+            ext: tar.gz
+            binary_name: simplechat
+          - goos: windows
+            goarch: amd64
+            zig_target: x86_64-windows-gnu
+            ext: zip
+            binary_name: simplechat.exe
+          - goos: windows
+            goarch: arm64
+            zig_target: aarch64-windows-gnu
+            ext: zip
+            binary_name: simplechat.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+
+      - name: Download frontend dependencies
+        run: make deps
+
+      - name: Run tests
+        run: cd backend && go test ./...
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CC: zig cc -target ${{ matrix.zig_target }}
+          CXX: zig c++ -target ${{ matrix.zig_target }}
+        run: |
+          mkdir -p dist
+          cd backend
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            LDFLAGS="-s -w -linkmode external -extldflags=-static"
+          else
+            LDFLAGS="-s -w"
+          fi
+          CGO_ENABLED=1 \
+            GOOS="${GOOS}" \
+            GOARCH="${GOARCH}" \
+            CC="${CC}" \
+            CXX="${CXX}" \
+            go build -trimpath \
+              -tags "sqlite_omit_load_extension" \
+              -ldflags "${LDFLAGS}" \
+              -o "../dist/${{ matrix.binary_name }}" .
+
+      - name: Package binary
+        run: |
+          cd dist
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            zip -9 "../simplechat-${{ matrix.goos }}-${{ matrix.goarch }}.zip" \
+              "${{ matrix.binary_name }}"
+          else
+            tar czf "../simplechat-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" \
+              "${{ matrix.binary_name }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: simplechat-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: sha256sum simplechat-* > SHA256SUMS.txt
+
+      - name: List release assets
+        run: ls -lh
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            simplechat-linux-amd64.tar.gz
+            simplechat-linux-arm64.tar.gz
+            simplechat-windows-amd64.zip
+            simplechat-windows-arm64.zip
+            SHA256SUMS.txt
+          generate_release_notes: true
