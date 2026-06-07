@@ -11,6 +11,7 @@ const state = {
     defaultModel: '',
     currentModel: '',
     activeSSE: false,
+    activeSSEJob: null,
     isReconnectPolling: false,
     autoScroll: true,
 };
@@ -186,7 +187,12 @@ async function loadSessionMessages(id) {
 }
 
 function switchSession(id, options = {}) {
+    if (state.activeSSE) {
+        detachActiveSSEForNavigation();
+    }
+
     stopReconnectPolling();
+
     const { pushHistory = false } = options;
     state.currentSessionId = id;
     localStorage.setItem('simplechat_last_session', id);
@@ -275,9 +281,11 @@ async function sendMessage() {
     const contentEl = assistantBubble.querySelector('.message-content');
     scrollToBottom({ force: true });
 
-    state.activeSSE = true;
-    updateSendButtonState();
+    const streamSessionId = state.currentSessionId;
+    const sseJob = beginActiveSSE(streamSessionId);
     let needRecover = false;
+    let abortedByNavigation = false;
+    let abortedByStop = false;
 
     try {
         const response = await fetch('/api/chat', {
@@ -286,8 +294,9 @@ async function sendMessage() {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${state.token}`,
             },
+            signal: sseJob.controller.signal,
             body: JSON.stringify({
-                session_id: state.currentSessionId,
+                session_id: streamSessionId,
                 model: state.currentModel,
                 message: message,
             }),
@@ -314,15 +323,30 @@ async function sendMessage() {
             localStorage.setItem('simplechat_last_session', result.sessionId);
         }
     } catch (err) {
-        contentEl.innerHTML = `<span class="error-text">错误: ${escapeHtml(err.message)}</span>`;
-        console.error('Chat error:', err);
-        needRecover = true;
+        if (isNavigationAbort(err, sseJob)) {
+            abortedByNavigation = true;
+        } else if (isStopAbort(err, sseJob)) {
+            abortedByStop = true;
+        } else {
+            contentEl.innerHTML = `<span class="error-text">错误: ${escapeHtml(err.message)}</span>`;
+            console.error('Chat error:', err);
+            needRecover = true;
+        }
     }
 
-    state.activeSSE = false;
+    finishActiveSSEJob(sseJob);
+
+    if (abortedByStop) {
+        return;
+    }
+
+    if (abortedByNavigation) {
+        loadSessions().catch(err => console.error('刷新会话列表失败:', err));
+        return;
+    }
 
     if (needRecover) {
-        await recoverStreamingSession(state.currentSessionId);
+        await recoverStreamingSession(streamSessionId);
     } else {
         stopReconnectPolling();
         updateSendButtonState();
@@ -635,6 +659,22 @@ function stopReconnectPolling() {
 
 function stopGeneratingState() {
     stopReconnectPolling();
+
+    if (state.activeSSEJob) {
+        const job = state.activeSSEJob;
+        job.abortReason = 'stop';
+
+        try {
+            job.controller.abort();
+        } catch {
+            // ignore
+        }
+
+        if (state.activeSSEJob === job) {
+            state.activeSSEJob = null;
+        }
+    }
+
     state.activeSSE = false;
     updateSendButtonState();
 }
@@ -682,6 +722,57 @@ async function recoverStreamingSession(sessionId) {
     } catch (err) {
         console.error('恢复生成中会话失败:', err);
     }
+}
+
+// ---- SSE 任务控制 ----
+function beginActiveSSE(sessionId) {
+    const job = {
+        sessionId,
+        controller: new AbortController(),
+        abortReason: '',
+    };
+
+    state.activeSSE = true;
+    state.activeSSEJob = job;
+    updateSendButtonState();
+
+    return job;
+}
+
+function finishActiveSSEJob(job) {
+    if (state.activeSSEJob === job) {
+        state.activeSSEJob = null;
+        state.activeSSE = false;
+    }
+    updateSendButtonState();
+}
+
+function detachActiveSSEForNavigation() {
+    if (!state.activeSSE || !state.activeSSEJob) return;
+
+    const job = state.activeSSEJob;
+    job.abortReason = 'navigation';
+
+    try {
+        job.controller.abort();
+    } catch {
+        // ignore
+    }
+
+    // 立刻释放前端锁，允许切换/新建/发送其他会话
+    if (state.activeSSEJob === job) {
+        state.activeSSEJob = null;
+    }
+    state.activeSSE = false;
+    updateSendButtonState();
+}
+
+function isNavigationAbort(err, job) {
+    return job && job.abortReason === 'navigation' && err && err.name === 'AbortError';
+}
+
+function isStopAbort(err, job) {
+    return job && job.abortReason === 'stop' && err && err.name === 'AbortError';
 }
 
 // ---- 辅助函数 ----
@@ -870,9 +961,11 @@ async function saveEdit(bubble) {
     if (!sessionId) return;
 
     // 禁用输入框，防止流式输出期间误发新消息
-    state.activeSSE = true;
-    updateSendButtonState();
+    const streamSessionId = sessionId;
+    const sseJob = beginActiveSSE(streamSessionId);
     let needRecover = false;
+    let abortedByNavigation = false;
+    let abortedByStop = false;
 
     // 乐观更新：先更新 UI，再发请求
     const contentEl = bubble.querySelector('.message-content');
@@ -907,8 +1000,9 @@ async function saveEdit(bubble) {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${state.token}`,
             },
+            signal: sseJob.controller.signal,
             body: JSON.stringify({
-                session_id: sessionId,
+                session_id: streamSessionId,
                 content: newContent,
                 model: state.currentModel,
             }),
@@ -924,14 +1018,29 @@ async function saveEdit(bubble) {
             assistantBubble.dataset.messageId = result.assistantMessageId;
         }
     } catch (err) {
-        console.error('Edit error:', err);
-        needRecover = true;
+        if (isNavigationAbort(err, sseJob)) {
+            abortedByNavigation = true;
+        } else if (isStopAbort(err, sseJob)) {
+            abortedByStop = true;
+        } else {
+            console.error('Edit error:', err);
+            needRecover = true;
+        }
     }
 
-    state.activeSSE = false;
+    finishActiveSSEJob(sseJob);
+
+    if (abortedByStop) {
+        return;
+    }
+
+    if (abortedByNavigation) {
+        loadSessions().catch(err => console.error('刷新会话列表失败:', err));
+        return;
+    }
 
     if (needRecover) {
-        await recoverStreamingSession(sessionId);
+        await recoverStreamingSession(streamSessionId);
     } else {
         stopReconnectPolling();
         updateSendButtonState();
@@ -951,9 +1060,11 @@ async function handleRegenerate(btn) {
     if (!sessionId) return;
 
     // 禁用输入框，防止流式输出期间误发新消息
-    state.activeSSE = true;
-    updateSendButtonState();
+    const streamSessionId = sessionId;
+    const sseJob = beginActiveSSE(streamSessionId);
     let needRecover = false;
+    let abortedByNavigation = false;
+    let abortedByStop = false;
 
     // 乐观更新：先更新 UI，再发请求
     let current = bubble;
@@ -987,8 +1098,9 @@ async function handleRegenerate(btn) {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${state.token}`,
             },
+            signal: sseJob.controller.signal,
             body: JSON.stringify({
-                session_id: sessionId,
+                session_id: streamSessionId,
                 model: state.currentModel,
             }),
         });
@@ -1003,14 +1115,29 @@ async function handleRegenerate(btn) {
             newBubble.dataset.messageId = result.assistantMessageId;
         }
     } catch (err) {
-        console.error('Regenerate error:', err);
-        needRecover = true;
+        if (isNavigationAbort(err, sseJob)) {
+            abortedByNavigation = true;
+        } else if (isStopAbort(err, sseJob)) {
+            abortedByStop = true;
+        } else {
+            console.error('Regenerate error:', err);
+            needRecover = true;
+        }
     }
 
-    state.activeSSE = false;
+    finishActiveSSEJob(sseJob);
+
+    if (abortedByStop) {
+        return;
+    }
+
+    if (abortedByNavigation) {
+        loadSessions().catch(err => console.error('刷新会话列表失败:', err));
+        return;
+    }
 
     if (needRecover) {
-        await recoverStreamingSession(sessionId);
+        await recoverStreamingSession(streamSessionId);
     } else {
         stopReconnectPolling();
         updateSendButtonState();
@@ -1147,7 +1274,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // === 新对话 ===
     newChatBtn.addEventListener('click', async () => {
-        if (state.activeSSE) return;
+        if (state.activeSSE) {
+            detachActiveSSEForNavigation();
+        }
+
         try {
             await createSession();
             chatInput.focus();
@@ -1262,7 +1392,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // 切换会话（用户主动点击，pushState 新增历史记录）
-        if (state.activeSSE) return;
+        if (state.activeSSE) {
+            detachActiveSSEForNavigation();
+        }
+
         switchSession(sessionId, { pushHistory: true });
     });
 
@@ -1383,8 +1516,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // === 浏览器前进/后退（popstate） ===
     window.addEventListener('popstate', async (e) => {
         if (state.activeSSE) {
-            syncURL(state.currentSessionId);
-            return;
+            detachActiveSSEForNavigation();
         }
 
         const sessionId = getSessionIdFromURL();
