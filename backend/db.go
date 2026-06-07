@@ -54,34 +54,12 @@ func InitDB(path string) (*DB, error) {
 	return d, nil
 }
 
-func (d *DB) columnExists(table, column string) (bool, error) {
-	rows, err := d.conn.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name, colType string
-		var notNull, pk int
-		var dfltValue *string
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
-			return false, err
-		}
-		if name == column {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
-}
-
 func (d *DB) migrate() error {
-	// 1. 创建基础表（新表定义已包含 status 字段）
+	// 1. 创建表结构
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL,
 			title TEXT NOT NULL DEFAULT '新对话',
 			created_at DATETIME NOT NULL DEFAULT (datetime('now')),
 			updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
@@ -89,7 +67,7 @@ func (d *DB) migrate() error {
 		`CREATE TABLE IF NOT EXISTS messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			session_id TEXT NOT NULL,
-			role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+			role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
 			content TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'done' CHECK(status IN ('done', 'streaming', 'error')),
 			created_at DATETIME NOT NULL DEFAULT (datetime('now')),
@@ -104,21 +82,7 @@ func (d *DB) migrate() error {
 		}
 	}
 
-	// 2. 检查旧表是否缺少 status 字段
-	hasStatus, err := d.columnExists("messages", "status")
-	if err != nil {
-		return err
-	}
-	if !hasStatus {
-		if _, err := d.conn.Exec("ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'done'"); err != nil {
-			return err
-		}
-	}
-
-	// 3. 废弃旧索引（按空 content 判断）
-	_, _ = d.conn.Exec("DROP INDEX IF EXISTS idx_one_pending_assistant_per_session")
-
-	// 4. 清理服务重启遗留的 streaming 消息（在创建唯一索引之前，避免异常数据导致索引失败）
+	// 2. 清理服务重启遗留的 streaming 消息（在创建唯一索引之前，避免异常数据导致索引失败）
 	if _, err := d.conn.Exec(`
 		UPDATE messages
 		SET status = 'error',
@@ -134,7 +98,7 @@ func (d *DB) migrate() error {
 		return err
 	}
 
-	// 5. 创建新索引（按 status 判断）
+	// 3. 创建唯一索引（每 session 最多一个正在生成中的 assistant）
 	if _, err := d.conn.Exec(
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_one_streaming_assistant_per_session
 		 ON messages(session_id) WHERE role = 'assistant' AND status = 'streaming'`,

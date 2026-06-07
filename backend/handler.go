@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -92,7 +93,12 @@ func (h *Handler) CreateSession(c *gin.Context) {
 	var req struct {
 		Title string `json:"title"`
 	}
-	c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		if !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式错误"})
+			return
+		}
+	}
 
 	session, err := h.DB.CreateSession(username, req.Title)
 	if err != nil {
@@ -385,7 +391,12 @@ func (h *Handler) RegenerateChat(c *gin.Context) {
 		SessionID string `json:"session_id"`
 		Model     string `json:"model"`
 	}
-	_ = c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		if !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式错误"})
+			return
+		}
+	}
 
 	// 获取要删除的消息
 	msg, err := h.DB.GetMessageByID(messageID)
@@ -476,7 +487,10 @@ func buildChatMessages(systemPrompt string, messages []Message) []ChatMessage {
 		chatMessages = append(chatMessages, ChatMessage{Role: "system", Content: systemPrompt})
 	}
 	for _, m := range messages {
-		if m.Status == "error" {
+		if m.Status != "done" {
+			continue
+		}
+		if m.Role != "user" && m.Role != "assistant" {
 			continue
 		}
 		chatMessages = append(chatMessages, ChatMessage{Role: m.Role, Content: m.Content})

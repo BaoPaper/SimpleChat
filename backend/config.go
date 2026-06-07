@@ -45,15 +45,11 @@ func LoadSettings(path string) (*Settings, error) {
 		return nil, err
 	}
 
-	s := &Settings{
-		Port:         8080,
-		JWTSecret:    "simplechat-secret",
-		DatabasePath: "./data/simplechat.db",
-	}
-	if err := json.Unmarshal(data, s); err != nil {
+	var s Settings
+	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
-	return s, nil
+	return &s, nil
 }
 
 // LoadModelsConfig 加载 models.json
@@ -99,7 +95,10 @@ func EnsureConfigsExist() error {
 			DatabasePath: "./data/simplechat.db",
 			SystemPrompt: "你是一个有用的 AI 助手。",
 		}
-		data, _ := json.MarshalIndent(defaultSettings, "", "  ")
+		data, err := json.MarshalIndent(defaultSettings, "", "  ")
+		if err != nil {
+			return fmt.Errorf("序列化默认 settings.json 失败: %w", err)
+		}
 		if err := os.WriteFile(settingsPath, data, 0600); err != nil {
 			return fmt.Errorf("创建 settings.json 失败: %w", err)
 		}
@@ -120,7 +119,10 @@ func EnsureConfigsExist() error {
 				{ID: "gpt-3.5-turbo", Name: "GPT-3.5 Turbo"},
 			},
 		}
-		data, _ := json.MarshalIndent(defaultModels, "", "  ")
+		data, err := json.MarshalIndent(defaultModels, "", "  ")
+		if err != nil {
+			return fmt.Errorf("序列化默认 models.json 失败: %w", err)
+		}
 		if err := os.WriteFile(modelsPath, data, 0600); err != nil {
 			return fmt.Errorf("创建 models.json 失败: %w", err)
 		}

@@ -17,10 +17,6 @@ type OpenAIService struct {
 	client       *http.Client
 }
 
-func (s *OpenAIService) getClient() *http.Client {
-	return s.client
-}
-
 // ChatMessage OpenAI 消息格式
 type ChatMessage struct {
 	Role    string `json:"role"`
@@ -80,7 +76,11 @@ func (s *OpenAIService) StreamChat(ctx context.Context, model string, messages [
 		}
 		req.Header.Set("Accept", "text/event-stream")
 
-		resp, err := s.getClient().Do(req)
+		client := s.client
+		if client == nil {
+			client = http.DefaultClient
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			errCh <- fmt.Errorf("请求 API 失败: %w", err)
 			return

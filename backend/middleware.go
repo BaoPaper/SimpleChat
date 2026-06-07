@@ -54,12 +54,21 @@ func AuthMiddleware(secret string) gin.HandlerFunc {
 			return
 		}
 
-		if claims, ok := token.Claims.(jwt.MapClaims); ok {
-			if username, ok := claims["user"].(string); ok {
-				c.Set("username", username)
-			}
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "认证已过期，请重新登录"})
+			c.Abort()
+			return
 		}
 
+		username, ok := claims["user"].(string)
+		if !ok || username == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "认证已过期，请重新登录"})
+			c.Abort()
+			return
+		}
+
+		c.Set("username", username)
 		c.Next()
 	}
 }
