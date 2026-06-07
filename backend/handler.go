@@ -321,6 +321,24 @@ func (h *Handler) EditChat(c *gin.Context) {
 		return
 	}
 
+	// 检查是否已有生成中的回复
+	pending, err := h.DB.HasPendingAssistant(req.SessionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "检查会话状态失败"})
+		return
+	}
+	if pending {
+		c.JSON(http.StatusConflict, gin.H{"error": "当前会话已有回复正在生成，请稍后再试"})
+		return
+	}
+
+	// 选择模型（放在 DB 写操作之前，确保参数校验失败不会修改数据）
+	model, err := h.normalizeModel(req.Model)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	// 安全更新用户消息内容（带 session 和 role 校验）
 	updated, err := h.DB.UpdateUserMessageContent(req.SessionID, messageID, req.Content)
 	if err != nil {
@@ -335,13 +353,6 @@ func (h *Handler) EditChat(c *gin.Context) {
 	// 删除该消息之后的所有消息
 	if err := h.DB.DeleteMessagesAfter(req.SessionID, messageID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "截断会话失败"})
-		return
-	}
-
-	// 选择模型
-	model, err := h.normalizeModel(req.Model)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -408,6 +419,24 @@ func (h *Handler) RegenerateChat(c *gin.Context) {
 		return
 	}
 
+	// 检查是否已有生成中的回复
+	pending, err := h.DB.HasPendingAssistant(msg.SessionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "检查会话状态失败"})
+		return
+	}
+	if pending {
+		c.JSON(http.StatusConflict, gin.H{"error": "当前会话已有回复正在生成，请稍后再试"})
+		return
+	}
+
+	// 选择模型（放在 DB 写操作之前，确保参数校验失败不会修改数据）
+	model, err := h.normalizeModel(req.Model)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	// 删除该消息及之后的所有消息
 	if err := h.DB.DeleteMessagesFrom(msg.SessionID, messageID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "截断会话失败"})
@@ -422,13 +451,6 @@ func (h *Handler) RegenerateChat(c *gin.Context) {
 	}
 
 	chatMessages := buildChatMessages(h.Settings.SystemPrompt, messages)
-
-	// 使用指定模型或默认模型
-	model, err := h.normalizeModel(req.Model)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
 
 	// 流式响应（RegenerateChat，userMsgID=0，不需要清理）
 	h.streamChatToSSE(c, msg.SessionID, model, chatMessages, 0, false)
